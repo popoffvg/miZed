@@ -375,6 +375,7 @@ pub enum Event {
     },
     LanguageServerPrompt(LanguageServerPromptRequest),
     LanguageServerShowDocument(LanguageServerShowDocumentRequest),
+    InlineInput(lsp_store::InlineInputRequest),
     LanguageNotFound(Entity<Buffer>),
     ActiveEntryChanged(Option<ProjectEntryId>),
     ActivateProjectPanel,
@@ -3880,6 +3881,7 @@ impl Project {
             LspStoreEvent::LanguageServerShowDocument(request) => {
                 cx.emit(Event::LanguageServerShowDocument(request.clone()))
             }
+            LspStoreEvent::InlineInput(request) => cx.emit(Event::InlineInput(request.clone())),
             LspStoreEvent::DiskBasedDiagnosticsStarted { language_server_id } => {
                 cx.emit(Event::DiskBasedDiagnosticsStarted {
                     language_server_id: *language_server_id,

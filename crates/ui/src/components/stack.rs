@@ -1,4 +1,5 @@
-use gpui::{Div, div};
+use gpui::{App, Div, Styled, div};
+use theme::ActiveTheme;
 
 use crate::StyledExt;
 
@@ -12,4 +13,15 @@ pub fn h_flex() -> Div {
 #[track_caller]
 pub fn v_flex() -> Div {
     div().v_flex()
+}
+
+pub fn inline_prompt_frame(cx: &App) -> Div {
+    v_flex()
+        .size_full()
+        .pt_0p5()
+        .gap_0p5()
+        .justify_center()
+        .border_y_1()
+        .border_color(cx.theme().colors().border)
+        .bg(cx.theme().colors().editor_background)
 }

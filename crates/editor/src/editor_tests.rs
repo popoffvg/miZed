@@ -51138,6 +51138,35 @@ async fn test_open_docs(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+async fn test_lsp_inline_input(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+    let mut cx = EditorLspTestContext::new_rust(lsp::ServerCapabilities::default(), cx).await;
+    for submit in [true, false] {
+        let request = cx.lsp.server.request::<lsp::InlineInput>(
+            lsp::InlineInputParams {
+                uri: cx.buffer_lsp_url.clone(),
+                line: 0,
+                placeholder: "Comment".into(),
+                value: "Review this line".into(),
+            },
+            DEFAULT_LSP_REQUEST_TIMEOUT,
+        );
+        let response = cx.executor().spawn(request);
+        cx.run_until_parked();
+        if submit {
+            cx.dispatch_action(crate::actions::Newline);
+        } else {
+            cx.dispatch_action(menu::Cancel);
+        }
+        cx.run_until_parked();
+        assert_eq!(
+            response.await.into_response().unwrap(),
+            submit.then(|| "Review this line".to_string())
+        );
+    }
+}
+
+#[gpui::test]
 async fn test_lsp_show_document(cx: &mut TestAppContext) {
     init_test(cx, |_| {});
     let mut cx = EditorLspTestContext::new_rust(lsp::ServerCapabilities::default(), cx).await;

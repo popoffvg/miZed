@@ -681,6 +681,11 @@ impl LocalLspStore {
                             cx,
                         );
                         params.initialization_options = initialization_options;
+                        if cx.has_global::<InlineInputSupport>()
+                            && let Some(capabilities) = &mut params.capabilities.experimental
+                        {
+                            capabilities["zedInlineInput"] = serde_json::Value::Bool(true);
+                        }
                         adapter.adapter.prepare_initialize_params(params, cx)
                     })?;
 
@@ -1300,6 +1305,25 @@ impl LocalLspStore {
                         }
 
                         Ok(response)
+                    }
+                }
+            })
+            .detach();
+
+        language_server
+            .on_request::<lsp::InlineInput, _, _>({
+                let store = lsp_store.clone();
+                move |params, cx| {
+                    let (sender, receiver) = async_channel::bounded(1);
+                    let result = store.update(cx, |_, cx| {
+                        cx.emit(LspStoreEvent::InlineInput(InlineInputRequest {
+                            params,
+                            responder: Arc::new(Mutex::new(Some(sender))),
+                        }));
+                    });
+                    async move {
+                        result?;
+                        Ok(receiver.recv().await.ok().flatten())
                     }
                 }
             })
@@ -4734,6 +4758,7 @@ pub enum LspStoreEvent {
     },
     Notification(String),
     LanguageServerShowDocument(LanguageServerShowDocumentRequest),
+    InlineInput(InlineInputRequest),
     RefreshInlayHints {
         server_id: LanguageServerId,
     },
@@ -16622,6 +16647,30 @@ impl LanguageServerPromptRequest {
 impl PartialEq for LanguageServerPromptRequest {
     fn eq(&self, other: &Self) -> bool {
         self.message == other.message && self.actions == other.actions
+    }
+}
+
+pub struct InlineInputSupport;
+
+impl gpui::Global for InlineInputSupport {}
+
+pub type InlineInputResponder = async_channel::Sender<Option<String>>;
+
+#[derive(Clone, Debug)]
+pub struct InlineInputRequest {
+    pub params: lsp::InlineInputParams,
+    responder: Arc<Mutex<Option<InlineInputResponder>>>,
+}
+
+impl InlineInputRequest {
+    pub fn take_responder(&self) -> Option<InlineInputResponder> {
+        self.responder.lock().take()
+    }
+}
+
+impl PartialEq for InlineInputRequest {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.responder, &other.responder)
     }
 }
 

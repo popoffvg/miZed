@@ -649,3 +649,23 @@ languages = ["JavaScript", "HTML", "CSS"]
 "HTML" = "html"
 "CSS" = "css"
 ```
+
+### Request inline text from a code action
+
+A language server can request text at a line in the active local editor when Zed advertises `capabilities.experimental.zedInlineInput`. Send a `zed/inlineInput` request with the document URI, a zero-based line, placeholder text, and an optional initial value.
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 7,
+  "method": "zed/inlineInput",
+  "params": {
+    "uri": "file:///project/main.rs",
+    "line": 4,
+    "placeholder": "Comment…",
+    "value": ""
+  }
+}
+```
+
+Enter submits the text as a JSON string. Escape cancels the request. Zed returns `null` on cancellation or when the active editor cannot show the requested line.

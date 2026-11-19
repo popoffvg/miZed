@@ -362,6 +362,7 @@ impl Navigated {
 }
 
 pub fn init(cx: &mut App) {
+    cx.set_global(project::lsp_store::InlineInputSupport);
     cx.set_global(GlobalBlameRenderer(Arc::new(())));
     cx.set_global(breadcrumbs::RenderBreadcrumbText(render_breadcrumb_text));
 
@@ -386,6 +387,17 @@ pub fn init(cx: &mut App) {
                         if let project::Event::LanguageServerShowDocument(request) = event {
                             items::handle_lsp_show_document(workspace, request, window, cx)
                                 .detach();
+                        }
+                        if let project::Event::InlineInput(request) = event {
+                            let editor = workspace
+                                .active_item_as::<SplittableEditor>(cx)
+                                .map(|split| split.read(cx).focused_editor().clone())
+                                .or_else(|| workspace.active_item_as::<Editor>(cx));
+                            if let Some(editor) = editor {
+                                editor.update(cx, |editor, cx| {
+                                    editor.show_lsp_inline_input(request, window, cx)
+                                });
+                            }
                         }
                     },
                 )
@@ -8921,6 +8933,125 @@ impl Editor {
             self.request_autoscroll(autoscroll, cx);
         }
         cx.notify();
+    }
+
+    fn show_lsp_inline_input(
+        &mut self,
+        request: &project::lsp_store::InlineInputRequest,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Ok(path) = request.params.uri.to_file_path() else {
+            return;
+        };
+        let buffer = self.buffer.read(cx);
+        let Some(anchor) = buffer.all_buffers_iter().find_map(|document| {
+            let file = document.read(cx).file()?.as_local()?;
+            if file.abs_path(cx) != path {
+                return None;
+            }
+            let snapshot = document.read(cx).snapshot();
+            let point = Point::new(request.params.line, 0);
+            if point > snapshot.max_point() {
+                return None;
+            }
+            buffer
+                .snapshot(cx)
+                .anchor_in_excerpt(snapshot.anchor_before(point))
+        }) else {
+            return;
+        };
+        let Some(sender) = request.take_responder() else {
+            return;
+        };
+        self.show_inline_text_prompt(
+            anchor,
+            &request.params.placeholder,
+            &request.params.value,
+            sender,
+            window,
+            cx,
+        );
+    }
+
+    pub fn show_inline_text_prompt(
+        &mut self,
+        anchor: Anchor,
+        placeholder: &str,
+        value: &str,
+        sender: project::lsp_store::InlineInputResponder,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let input = cx.new(|cx| {
+            let mut input = Editor::auto_height(1, 3, window, cx);
+            input.set_placeholder_text(placeholder, window, cx);
+            input.set_text(value.to_owned(), window, cx);
+            input
+        });
+        let parent = cx.weak_entity();
+        let field = input.clone();
+        self.insert_blocks(
+            [BlockProperties {
+                placement: BlockPlacement::Above(anchor),
+                height: Some(3),
+                style: BlockStyle::Sticky,
+                priority: 0,
+                render: Arc::new(move |cx| {
+                    let BlockId::Custom(id) = cx.block_id else {
+                        return div().into_any_element();
+                    };
+                    let finish = {
+                        let parent = parent.clone();
+                        let field = field.clone();
+                        let sender = sender.clone();
+                        move |submit: bool, window: &mut Window, cx: &mut App| {
+                            cx.stop_propagation();
+                            sender
+                                .try_send(submit.then(|| field.read(cx).text(cx)))
+                                .ok();
+                            if let Some(parent) = parent.upgrade() {
+                                parent.update(cx, |editor, cx| {
+                                    editor.remove_blocks([id].into_iter().collect(), None, cx);
+                                    window.focus(&editor.focus_handle(cx), cx);
+                                });
+                            }
+                        }
+                    };
+                    ui::inline_prompt_frame(cx)
+                        .block_mouse_except_scroll()
+                        .px_2()
+                        .capture_action({
+                            let finish = finish.clone();
+                            move |_: &menu::Cancel, window, cx| finish(false, window, cx)
+                        })
+                        .capture_action({
+                            let finish = finish.clone();
+                            move |_: &crate::actions::Newline, window, cx| finish(true, window, cx)
+                        })
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .child(
+                                    IconButton::new("cancel-inline-input", IconName::Close)
+                                        .on_click({
+                                            let finish = finish.clone();
+                                            move |_, window, cx| finish(false, window, cx)
+                                        }),
+                                )
+                                .child(div().flex_1().child(field.clone()))
+                                .child(
+                                    Button::new("submit-inline-input", "Submit")
+                                        .on_click(move |_, window, cx| finish(true, window, cx)),
+                                ),
+                        )
+                        .into_any_element()
+                }),
+            }],
+            Some(Autoscroll::fit()),
+            cx,
+        );
+        window.focus(&input.focus_handle(cx), cx);
     }
 
     pub fn remove_blocks(

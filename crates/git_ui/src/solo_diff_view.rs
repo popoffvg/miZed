@@ -50,6 +50,10 @@ pub struct SoloDiffView {
 }
 
 impl SoloDiffView {
+    pub(crate) fn diff_editor(&self) -> &Entity<SplittableEditor> {
+        &self.editor
+    }
+
     pub fn open_or_focus(
         entry: GitStatusEntry,
         repository: Entity<Repository>,

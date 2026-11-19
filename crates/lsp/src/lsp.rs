@@ -44,6 +44,23 @@ use util::{ConnectionResult, redact};
 const JSON_RPC_VERSION: &str = "2.0";
 const CONTENT_LEN_HEADER: &str = "Content-Length: ";
 
+pub enum InlineInput {}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct InlineInputParams {
+    pub uri: Uri,
+    pub line: u32,
+    pub placeholder: String,
+    #[serde(default)]
+    pub value: String,
+}
+
+impl request::Request for InlineInput {
+    type Params = InlineInputParams;
+    type Result = Option<String>;
+    const METHOD: &'static str = "zed/inlineInput";
+}
+
 /// The default amount of time to wait while initializing or fetching LSP servers, in seconds.
 ///
 /// Should not be used (in favor of DEFAULT_LSP_REQUEST_TIMEOUT) and is exported solely for use inside ProjectSettings defaults.

@@ -2315,6 +2315,7 @@ impl Render for SplittableEditor {
 
         div()
             .id("splittable-editor")
+            .key_context("DiffEditor")
             .on_action(cx.listener(Self::toggle_split))
             .on_action(cx.listener(Self::activate_pane_left))
             .on_action(cx.listener(Self::activate_pane_right))

@@ -146,19 +146,12 @@ impl<T: 'static> Render for PromptEditor<T> {
             .render_markdown(markdown, markdown_style(window, cx))
             .into_any_element();
 
-        v_flex()
+        ui::inline_prompt_frame(cx)
             .key_context("InlineAssistant")
             .capture_action(cx.listener(Self::paste))
             .block_mouse_except_scroll()
-            .size_full()
-            .pt_0p5()
             .pb(bottom_padding)
             .pr(right_padding)
-            .gap_0p5()
-            .justify_center()
-            .border_y_1()
-            .border_color(cx.theme().colors().border)
-            .bg(cx.theme().colors().editor_background)
             .child(
                 h_flex()
                     .on_action(cx.listener(Self::confirm))

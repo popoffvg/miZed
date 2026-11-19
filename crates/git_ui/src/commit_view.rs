@@ -57,11 +57,13 @@ actions!(
         PopCurrentStash,
         DropCurrentStash,
         OpenFileAtHead,
+        EditLineComment,
     ]
 );
 
 pub fn init(cx: &mut App) {
     cx.observe_new(|workspace: &mut Workspace, _window, _cx| {
+        workspace.register_action(edit_line_comment);
         workspace.register_action(|workspace, _: &ApplyCurrentStash, window, cx| {
             CommitView::apply_stash(workspace, window, cx);
         });
@@ -73,6 +75,140 @@ pub fn init(cx: &mut App) {
         });
     })
     .detach();
+}
+
+fn edit_line_comment(
+    workspace: &mut Workspace,
+    _: &EditLineComment,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let Some(split) = workspace
+        .active_item_as::<SplittableEditor>(cx)
+        .or_else(|| {
+            workspace
+                .active_item_as::<crate::solo_diff_view::SoloDiffView>(cx)
+                .map(|view| view.read(cx).diff_editor().clone())
+        })
+    else {
+        cx.propagate();
+        return;
+    };
+    let result = diff_comment_target(workspace, &split, cx);
+    let Some((editor, anchor, target, revision)) =
+        workspace::notifications::NotifyResultExt::notify_err(result, workspace, cx)
+    else {
+        return;
+    };
+    let editor = editor.downgrade();
+    let workspace = cx.weak_entity();
+    window
+        .spawn(cx, async move |cx| {
+            let value = run_diff_comment(&target, &revision, None).await?;
+            let (sender, receiver) = async_channel::bounded(1);
+            editor.update_in(cx, |editor, window, cx| {
+                editor.show_inline_text_prompt(anchor, "Comment…", &value, sender, window, cx);
+            })?;
+            if let Ok(Some(text)) = receiver.recv().await {
+                run_diff_comment(&target, &revision, Some(&text)).await?;
+            }
+            anyhow::Ok(())
+        })
+        .detach_and_notify_err(workspace, window, cx);
+}
+
+fn diff_comment_target(
+    workspace: &Workspace,
+    split: &Entity<SplittableEditor>,
+    cx: &mut App,
+) -> Result<(Entity<Editor>, editor::Anchor, String, String)> {
+    anyhow::ensure!(
+        workspace.project().read(cx).is_local(),
+        "Diff comments require a local project"
+    );
+    let split = split.read(cx);
+    let editor = split.focused_editor().clone();
+    let rhs = split.rhs_editor().clone();
+    let view = editor.read(cx);
+    let buffer = view.buffer().read(cx);
+    let snapshot = buffer.snapshot(cx);
+    let selection = view.selections.newest_anchor();
+    let anchor = selection.start;
+    use editor::ToPoint as _;
+    let (source, range) = snapshot
+        .range_to_buffer_range(
+            selection.start.to_point(&snapshot)..selection.end.to_point(&snapshot),
+        )
+        .context("Select lines from one side of one file")?;
+    let main_id = anchor.buffer_id().unwrap_or(source.remote_id());
+    let rhs_id = buffer
+        .diff_for(main_id)
+        .map_or(main_id, |diff| diff.read(cx).buffer_id);
+    let document = rhs
+        .read(cx)
+        .buffer()
+        .read(cx)
+        .buffer(rhs_id)
+        .context("Cannot find the diff file")?;
+    let file = document
+        .read(cx)
+        .file()
+        .context("The diff has no file path")?;
+    let (path, revision) = if let Some(commit) = workspace.active_item_as::<CommitView>(cx) {
+        let commit = commit.read(cx);
+        let path = commit
+            .repository
+            .read(cx)
+            .work_directory_abs_path
+            .join(file.path().as_std_path());
+        let revision = if source.remote_id() == rhs_id
+            && !matches!(file.disk_state(), DiskState::Historic { was_deleted: true })
+        {
+            commit.commit.sha.to_string()
+        } else {
+            format!("{}^", commit.commit.sha)
+        };
+        (path, revision)
+    } else {
+        (
+            source
+                .file()
+                .and_then(|source_file| source_file.as_local())
+                .or_else(|| file.as_local())
+                .context("The diff has no local file path")?
+                .abs_path(cx),
+            String::new(),
+        )
+    };
+    let first = range.start.row + 1;
+    let last = if range.end.column == 0 && range.end.row > range.start.row {
+        range.end.row
+    } else {
+        range.end.row + 1
+    };
+    let target = format!("{}:{first}-{last}", path.display());
+    Ok((editor, anchor, target, revision))
+}
+
+async fn run_diff_comment(target: &str, revision: &str, body: Option<&str>) -> Result<String> {
+    let installed = util::paths::home_dir().join(".local/bin/line-comment-lsp");
+    let program = if installed.is_file() {
+        installed
+    } else {
+        PathBuf::from("line-comment-lsp")
+    };
+    let output = util::command::new_command(program)
+        .args(["diff-comment", target, revision])
+        .args(body)
+        .output()
+        .await?;
+    anyhow::ensure!(
+        output.status.success(),
+        "Line comment failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout)
+        .context("Install the line-comment server with diff support")
 }
 
 pub struct CommitView {
