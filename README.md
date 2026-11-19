@@ -1,48 +1,125 @@
-# Zed
+> [!IMPORTANT]
+> Remove this line to confirm you've reviewed this PR before submitting.
 
-[![Zed](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/zed-industries/zed/main/assets/badge/v0.json)](https://zed.dev)
-[![CI](https://github.com/zed-industries/zed/actions/workflows/run_tests.yml/badge.svg)](https://github.com/zed-industries/zed/actions/workflows/run_tests.yml)
+# miZed
 
-Welcome to Zed, a high-performance, multiplayer code editor from the creators of [Atom](https://github.com/atom/atom) and [Tree-sitter](https://github.com/tree-sitter/tree-sitter).
+A code editor. miZed is a fork of [Zed](https://zed.dev) with my own changes on top: agent terminals that live in [Herdr Desktop](#herdr-desktop-terminals), a menu that starts a terminal agent with one key, and an inline prompt that a language server or a diff view can open under a line.
 
----
+### [Download miZed](https://github.com/popoffvg/miZed/releases/latest)
 
-### Installation
+This is a personal fork. I keep it because I want a few editor changes now, and most of them do not belong in the product scope of Zed. Zed is the real project. miZed follows its `main` branch and adds my changes on top.
 
-On macOS, Linux, and Windows you can [download Zed directly](https://zed.dev/download) or install Zed via your local package manager ([macOS](https://zed.dev/docs/installation#macos)/[Linux](https://zed.dev/docs/linux#installing-via-a-package-manager)/[Windows](https://zed.dev/docs/windows#package-managers)).
+**Platforms:** macOS (Apple Silicon). Build from source for other platforms.
 
-Other platforms are not yet available:
+**Stability:** I use it as my daily editor, and that is most of its QA. A sync with upstream can break things. Bug reports are welcome.
 
-- Web ([tracking discussion](https://github.com/zed-industries/zed/discussions/26195))
+## Features
 
-### Developing Zed
+1. [Herdr Desktop terminals](#herdr-desktop-terminals): the Agent Panel and the Threads Sidebar show the terminals of Herdr Desktop
+2. [Terminal agent menu](#terminal-agent-menu): start Claude Code, Codex, Pi, OpenCode, Cursor, Amp, Crush, Copilot, or Gemini with one key
+3. [Inline input for language servers](#inline-input-for-language-servers): a language server asks for one line of text in a prompt under a line of the editor
+4. [Line comments in diffs](#line-comments-in-diffs): comment on lines of a commit or a diff from the keyboard
 
-- [Building Zed for macOS](./docs/src/development/macos.md)
-- [Building Zed for Linux](./docs/src/development/linux.md)
-- [Building Zed for Windows](./docs/src/development/windows.md)
+### Herdr Desktop terminals
 
-### Contributing
+With this setting, each terminal thread of the Agent Panel runs in a terminal of Herdr Desktop:
 
-See [CONTRIBUTING.md](./CONTRIBUTING.md) for ways you can contribute to Zed.
+```json
+{
+  "agent": {
+    "threads_sidebar": {
+      "herdr_sessions": true
+    }
+  }
+}
+```
 
-Also... we're hiring! Check out our [jobs](https://zed.dev/jobs) page for open roles.
+- Put the `herdr-app` and `hc` commands of Herdr Desktop on your `PATH`.
+- The Threads Sidebar shows the Herdr terminals under their projects, and hides the Zed agent threads.
+- A new terminal thread opens a tab in the Herdr space of the project folder. If the folder has no space, miZed creates one.
+- Close a row to remove it from the sidebar. The Herdr terminal continues to run.
+- The terminal title comes from Herdr, and the sidebar reads it every three seconds.
+- Drag with the left mouse button to select text in the terminal.
 
-### Licensing
+Herdr terminals are local. A remote project uses the usual Zed terminals.
 
-Zed source code is licensed primarily under GPL-3.0-or-later, with Apache-2.0 components where marked.
+### Terminal agent menu
 
-License information for third party dependencies must be correctly provided for CI to pass.
+When Herdr terminals are on, the **+** menu of the Agent Panel lists the terminal agents:
 
-We use [`cargo-about`](https://github.com/EmbarkStudios/cargo-about) to automatically comply with open source licenses. If CI is failing, check the following:
+- **Terminal** starts a plain shell (`cmd-t`).
+- Each agent on your `PATH` gets a number key (`1`, `2`, ...). An agent that is not installed shows "not installed".
+- **New space** (`cmd-n`), **New worktree…**, and **Open worktree…** are in the same menu.
 
-- Is it showing a `no license specified` error for a crate you've created? If so, add `publish = false` under `[package]` in your crate's Cargo.toml.
-- Is the error `failed to satisfy license requirements` for a dependency? If so, first determine what license the project has and whether this system is sufficient to comply with this license's requirements. If you're unsure, ask a lawyer. Once you've verified that this system is acceptable add the license's SPDX identifier to the `accepted` array in `script/licenses/zed-licenses.toml`.
-- Is `cargo-about` unable to find the license for a dependency? If so, add a clarification field at the end of `script/licenses/zed-licenses.toml`, as specified in the [cargo-about book](https://embarkstudios.github.io/cargo-about/cli/generate/config.html#crate-configuration).
+To start a different command for an entry, set it by the executable name:
 
-## Sponsorship
+```json
+{
+  "agent": {
+    "terminal_agent_commands": {
+      "claude": "claudex"
+    }
+  }
+}
+```
 
-Zed is developed by **Zed Industries, Inc.**, a for-profit company.
+### Inline input for language servers
 
-If you’d like to financially support the project, you can do so via GitHub Sponsors.
-Sponsorships go directly to Zed Industries and are used as general company revenue.
-There are no perks or entitlements associated with sponsorship.
+When miZed advertises `capabilities.experimental.zedInlineInput`, a language server can send a `zed/inlineInput` request. miZed then opens a one-line prompt under that line of the active editor:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 7,
+  "method": "zed/inlineInput",
+  "params": {
+    "uri": "file:///project/main.rs",
+    "line": 4,
+    "placeholder": "Comment…",
+    "value": ""
+  }
+}
+```
+
+Enter sends the text as a JSON string. Escape cancels, and the result is `null`. The protocol is in [docs/src/extensions/languages.md](docs/src/extensions/languages.md).
+
+### Line comments in diffs
+
+The `git: edit line comment` action (`git::EditLineComment`) opens the inline prompt under the selected lines of a commit view or a diff view. It reads and saves the comment with the `diff-comment` command of [line-comment-lsp](https://github.com/popoffvg/dotfiles/tree/main/harness/apps/line-comment). miZed looks for the tool in `~/.local/bin/line-comment-lsp`, then on your `PATH`. Bind the action in your keymap, for example:
+
+```json
+[
+  {
+    "context": "DiffEditor",
+    "bindings": { "cmd-.": "git::EditLineComment" }
+  }
+]
+```
+
+## Install
+
+### Manual download
+
+From [Releases](https://github.com/popoffvg/miZed/releases), download the `.dmg`, open it, and drag the app to `/Applications`.
+
+The build is not signed with an Apple certificate. Before the first start, remove the quarantine flag:
+
+```sh
+xattr -dr com.apple.quarantine "/Applications/Zed Dev.app"
+```
+
+The app uses the `dev` release channel, so it installs as **Zed Dev**. It keeps its own settings, extensions, and history, and runs next to the official Zed.
+
+### Build from source
+
+```sh
+git clone git@github.com:popoffvg/miZed.git
+cd miZed
+script/bundle-mac -i    # release build, installs into /Applications
+```
+
+For the build requirements, see [Building Zed for macOS](./docs/src/development/macos.md).
+
+## Licensing
+
+Zed source code is licensed primarily under GPL-3.0-or-later, with Apache-2.0 components where marked. miZed uses the same licenses. Zed is developed by **Zed Industries, Inc.** This fork is not made or supported by Zed Industries.
