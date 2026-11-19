@@ -105,17 +105,17 @@ From [Releases](https://github.com/popoffvg/miZed/releases), download the `.dmg`
 The build is not signed with an Apple certificate. Before the first start, remove the quarantine flag:
 
 ```sh
-xattr -dr com.apple.quarantine "/Applications/Zed Dev.app"
+xattr -dr com.apple.quarantine "/Applications/miZed.app"
 ```
 
-The app uses the `dev` release channel, so it installs as **Zed Dev**. It keeps its own settings, extensions, and history, and runs next to the official Zed.
+The app installs as **miZed**, with a purple icon, and runs next to the official Zed. It uses the `dev` release channel, so it does not download updates from zed.dev. It keeps its own workspace database (`0-dev`). It shares settings (`~/.config/zed`) and extensions (`~/Library/Application Support/Zed`) with Zed.
 
 ### Build from source
 
 ```sh
 git clone git@github.com:popoffvg/miZed.git
 cd miZed
-script/bundle-mac -i    # release build, installs into /Applications
+CARGO_PROFILE_RELEASE_DEBUG=false script/bundle-mac -i    # release build without debug info, installs into /Applications
 ```
 
 For the build requirements, see [Building Zed for macOS](./docs/src/development/macos.md).
