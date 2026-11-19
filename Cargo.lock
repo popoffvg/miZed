@@ -9995,6 +9995,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "line_comments"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "collections",
+ "editor",
+ "fs",
+ "futures 0.3.34",
+ "gpui",
+ "language",
+ "multi_buffer",
+ "project",
+ "serde",
+ "serde_json",
+ "settings",
+ "theme",
+ "theme_settings",
+ "ui",
+ "util",
+]
+
+[[package]]
 name = "line_ending_selector"
 version = "0.1.0"
 dependencies = [
@@ -22614,6 +22636,7 @@ dependencies = [
  "language_selector",
  "language_tools",
  "languages",
+ "line_comments",
  "line_ending_selector",
  "log",
  "lsp_command_selector",

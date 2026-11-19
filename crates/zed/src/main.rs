@@ -777,6 +777,7 @@ fn main() {
         journal::init(app_state.clone(), cx);
         encoding_selector::init(cx);
         language_selector::init(cx);
+        line_comments::init(cx);
         line_ending_selector::init(cx);
         lsp_command_selector::init(cx);
         toolchain_selector::init(cx);
