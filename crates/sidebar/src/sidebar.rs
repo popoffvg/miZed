@@ -1629,7 +1629,8 @@ impl Sidebar {
             let mut waiting_thread_count: usize = 0;
             let group_host = group_key.host();
 
-            if should_load_threads {
+            let terminals_only = AgentSettings::get_global(cx).threads_sidebar.herdr_sessions;
+            if should_load_threads && !terminals_only {
                 let thread_store = ThreadMetadataStore::global(cx);
 
                 let make_thread_entry =
@@ -1827,7 +1828,7 @@ impl Sidebar {
                     let b_time = Self::thread_display_time(&b.metadata);
                     b_time.cmp(&a_time)
                 });
-            } else {
+            } else if !terminals_only {
                 for info in live_infos {
                     if info.status == AgentThreadStatus::Running {
                         has_running_threads = true;
@@ -1867,21 +1868,22 @@ impl Sidebar {
             }
 
             let has_visible_rows = !threads.is_empty() || !terminals.is_empty();
-            let has_stored_thread_rows = !should_load_threads && !has_visible_rows && {
-                let store = ThreadMetadataStore::global(cx).read(cx);
-                store
-                    .entries_for_main_worktree_path(group_key.path_list(), group_host)
-                    .any(|metadata| {
-                        let workspace = resolve_workspace(metadata.folder_paths());
-                        thread_metadata_would_render_sidebar_row(metadata, &workspace, cx)
-                    })
-                    || store
-                        .entries_for_path(group_key.path_list(), group_host)
+            let has_stored_thread_rows =
+                !terminals_only && !should_load_threads && !has_visible_rows && {
+                    let store = ThreadMetadataStore::global(cx).read(cx);
+                    store
+                        .entries_for_main_worktree_path(group_key.path_list(), group_host)
                         .any(|metadata| {
                             let workspace = resolve_workspace(metadata.folder_paths());
                             thread_metadata_would_render_sidebar_row(metadata, &workspace, cx)
                         })
-            };
+                        || store
+                            .entries_for_path(group_key.path_list(), group_host)
+                            .any(|metadata| {
+                                let workspace = resolve_workspace(metadata.folder_paths());
+                                thread_metadata_would_render_sidebar_row(metadata, &workspace, cx)
+                            })
+                };
             let has_threads = has_visible_rows || has_stored_thread_rows;
 
             if !query.is_empty() {
@@ -1980,24 +1982,24 @@ impl Sidebar {
                 // When collapsed, threads aren't loaded into `threads`, so we
                 // query the store for thread IDs to check notifications and
                 // to prevent the retain below from purging them.
-                let has_thread_notifications = if threads.is_empty() && !notified_threads.is_empty()
-                {
-                    let thread_store = ThreadMetadataStore::global(cx);
-                    let store = thread_store.read(cx);
-                    let group_thread_ids = store
-                        .entries_for_main_worktree_path(group_key.path_list(), group_host)
-                        .chain(store.entries_for_path(group_key.path_list(), group_host))
-                        .map(|m| m.thread_id)
-                        .collect::<HashSet<_>>();
-                    current_thread_ids.extend(group_thread_ids.iter());
-                    group_thread_ids
-                        .iter()
-                        .any(|id| notified_threads.contains(id))
-                } else {
-                    threads
-                        .iter()
-                        .any(|t| notified_threads.contains(&t.metadata.thread_id))
-                };
+                let has_thread_notifications =
+                    if !terminals_only && threads.is_empty() && !notified_threads.is_empty() {
+                        let thread_store = ThreadMetadataStore::global(cx);
+                        let store = thread_store.read(cx);
+                        let group_thread_ids = store
+                            .entries_for_main_worktree_path(group_key.path_list(), group_host)
+                            .chain(store.entries_for_path(group_key.path_list(), group_host))
+                            .map(|m| m.thread_id)
+                            .collect::<HashSet<_>>();
+                        current_thread_ids.extend(group_thread_ids.iter());
+                        group_thread_ids
+                            .iter()
+                            .any(|id| notified_threads.contains(id))
+                    } else {
+                        threads
+                            .iter()
+                            .any(|t| notified_threads.contains(&t.metadata.thread_id))
+                    };
 
                 project_header_indices.push(entries.len());
                 entries.push(ListEntry::ProjectHeader {
@@ -7038,6 +7040,9 @@ impl Sidebar {
         workspace: &Entity<Workspace>,
         cx: &App,
     ) -> bool {
+        if AgentSettings::get_global(cx).threads_sidebar.herdr_sessions {
+            return true;
+        }
         workspace
             .read(cx)
             .panel::<AgentPanel>(cx)

@@ -242,6 +242,7 @@ pub struct AgentSettings {
     pub expand_edit_card: bool,
     pub expand_terminal_card: bool,
     pub terminal_init_command: Option<String>,
+    pub terminal_agent_commands: IndexMap<String, String>,
     pub thinking_display: ThinkingBlockDisplay,
     pub cancel_generation_on_terminal_stop: bool,
     pub use_modifier_to_send: bool,
@@ -255,6 +256,7 @@ pub struct AgentSettings {
 
 #[derive(Clone, Copy, Debug)]
 pub struct ThreadsSidebarSettings {
+    pub herdr_sessions: bool,
     pub auto_open: bool,
     pub position: SidebarDockPosition,
     pub default_width: Pixels,
@@ -777,6 +779,7 @@ impl Settings for AgentSettings {
             dock: agent.dock.unwrap(),
             max_idle_retained_threads: agent.max_idle_retained_threads.unwrap(),
             threads_sidebar: ThreadsSidebarSettings {
+                herdr_sessions: threads_sidebar.herdr_sessions.unwrap_or(false),
                 auto_open: threads_sidebar.auto_open.unwrap(),
                 position: threads_sidebar.position.unwrap(),
                 // Clamped once here so that every reader gets a width the sidebar can
@@ -836,6 +839,7 @@ impl Settings for AgentSettings {
             enable_feedback: agent.enable_feedback.unwrap(),
             expand_edit_card: agent.expand_edit_card.unwrap(),
             expand_terminal_card: agent.expand_terminal_card.unwrap(),
+            terminal_agent_commands: agent.terminal_agent_commands.unwrap_or_default(),
             terminal_init_command: agent
                 .terminal_init_command
                 .filter(|command| !command.trim().is_empty()),

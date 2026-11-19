@@ -39,6 +39,8 @@ pub enum SidebarDockPosition {
 #[with_fallible_options]
 #[derive(Clone, PartialEq, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, Default)]
 pub struct ThreadsSidebarSettingsContent {
+    /// Shows local Herdr Desktop terminals in the Threads Sidebar.
+    pub herdr_sessions: Option<bool>,
     /// Whether opening a folder in an existing window automatically opens the
     /// Threads Sidebar. Applies when `default_open_behavior` or
     /// `cli_default_open_behavior` is set to `existing_window`.
@@ -368,6 +370,8 @@ pub struct AgentSettingsContent {
     ///
     /// Default: ""
     pub terminal_init_command: Option<String>,
+    /// Shell commands for terminal agent menu entries, keyed by executable name.
+    pub terminal_agent_commands: Option<IndexMap<String, String>>,
     /// How thinking blocks should be displayed by default in the agent panel.
     ///
     /// Default: auto

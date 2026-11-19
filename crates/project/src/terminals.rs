@@ -287,7 +287,16 @@ impl Project {
         cwd: Option<PathBuf>,
         cx: &mut Context<Self>,
     ) -> Task<Result<Entity<Terminal>>> {
-        self.create_terminal_shell_internal(cwd, false, cx)
+        self.create_terminal_shell_internal(cwd, false, None, cx)
+    }
+
+    pub fn create_terminal_program(
+        &mut self,
+        cwd: Option<PathBuf>,
+        program: Shell,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<Entity<Terminal>>> {
+        self.create_terminal_shell_internal(cwd, true, Some(program), cx)
     }
 
     /// Creates a local terminal even if the project is remote.
@@ -304,7 +313,7 @@ impl Project {
             // Local project: use project directory like normal terminals
             self.active_project_directory(cx).map(|p| p.to_path_buf())
         };
-        self.create_terminal_shell_internal(working_directory, true, cx)
+        self.create_terminal_shell_internal(working_directory, true, None, cx)
     }
 
     /// Internal method for creating terminal shells.
@@ -314,6 +323,7 @@ impl Project {
         &mut self,
         cwd: Option<PathBuf>,
         force_local: bool,
+        program: Option<Shell>,
         cx: &mut Context<Self>,
     ) -> Task<Result<Entity<Terminal>>> {
         let path = cwd.map(|p| Arc::from(&*p));
@@ -329,7 +339,7 @@ impl Project {
             });
         }
         let settings = TerminalSettings::get(settings_location, cx).clone();
-        let detect_venv = settings.detect_venv.as_option().is_some();
+        let detect_venv = program.is_none() && settings.detect_venv.as_option().is_some();
         let local_path = if is_via_remote { None } else { path.clone() };
 
         // See create_terminal_task: scope the toolchain lookup to the
@@ -439,7 +449,7 @@ impl Project {
                                 };
                                 create_remote_shell(spawn_command, env, path, remote_client, cx)?
                             }
-                            None => (settings.shell, env),
+                            None => (program.unwrap_or(settings.shell), env),
                         }
                     };
                     anyhow::Ok(TerminalBuilder::new(

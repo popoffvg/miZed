@@ -621,6 +621,7 @@ mod tests {
             expand_edit_card: true,
             expand_terminal_card: true,
             terminal_init_command: None,
+            terminal_agent_commands: Default::default(),
             cancel_generation_on_terminal_stop: true,
             use_modifier_to_send: true,
             message_editor_min_lines: 1,
@@ -631,6 +632,7 @@ mod tests {
             auto_generate_thread_titles: true,
             max_idle_retained_threads: 5,
             threads_sidebar: agent_settings::ThreadsSidebarSettings {
+                herdr_sessions: false,
                 auto_open: true,
                 default_width: px(300.),
                 position: settings::SidebarDockPosition::Left,

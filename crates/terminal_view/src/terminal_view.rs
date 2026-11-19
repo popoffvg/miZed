@@ -148,6 +148,7 @@ pub struct TerminalView {
     background_corner_radii: Option<Corners<Rems>>,
     content_top_padding: Rems,
     read_only: bool,
+    local_selection: bool,
     // Explicit override for whether workspace-specific context menu actions are shown.
     // When `None`, visibility is derived from `mode` (hidden for embedded terminals).
     show_workspace_actions: Option<bool>,
@@ -303,6 +304,7 @@ impl TerminalView {
             background_corner_radii: None,
             content_top_padding: Rems::ZERO,
             read_only: false,
+            local_selection: false,
             show_workspace_actions: None,
             workspace_id,
             show_breadcrumbs: TerminalSettings::get_global(cx).toolbar.breadcrumbs,
@@ -379,6 +381,11 @@ impl TerminalView {
         } else {
             MouseInputMode::ReportToTerminal
         }
+    }
+
+    pub fn with_local_selection(mut self, enabled: bool) -> Self {
+        self.local_selection = enabled;
+        self
     }
 
     /// Explicitly override whether workspace-specific context menu actions (e.g. creating or
@@ -2664,7 +2671,38 @@ mod tests {
             window.blur(cx);
         });
         cx.run_until_parked();
-        let bounds = terminal.read_with(&cx, |terminal, _| terminal.last_content.terminal_bounds);
+        assert_drag_copies_hello(&terminal, &mut cx);
+        cx.update(|window, cx| window.blur(cx));
+        cx.run_until_parked();
+        assert!(
+            terminal
+                .update(&mut cx, |terminal, _| terminal.take_pty_write_log())
+                .is_empty()
+        );
+    }
+
+    #[gpui::test]
+    async fn local_selection_copies_from_mouse_reporting_terminal(cx: &mut TestAppContext) {
+        let (project, _, window_handle) = init_test_with_window(cx).await;
+        let (_, terminal, view) =
+            add_display_only_terminal(&project, window_handle, true, false, cx);
+        let mut cx = VisualTestContext::from_window(window_handle.into(), cx);
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.local_selection = true;
+                cx.notify();
+            });
+            terminal.update(cx, |terminal, cx| {
+                terminal.write_output(b"\x1b[?1003h\x1b[?1006hhello world\n", cx);
+                terminal.sync(window, cx);
+            });
+        });
+        cx.run_until_parked();
+        assert_drag_copies_hello(&terminal, &mut cx);
+    }
+
+    fn assert_drag_copies_hello(terminal: &Entity<Terminal>, cx: &mut VisualTestContext) {
+        let bounds = terminal.read_with(cx, |terminal, _| terminal.last_content.terminal_bounds);
         let start =
             bounds.bounds.origin + gpui::point(bounds.cell_width * 0.1, bounds.line_height * 0.5);
         let end =
@@ -2678,13 +2716,6 @@ mod tests {
         assert_eq!(
             cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text())),
             Some("hello".into()),
-        );
-        cx.update(|window, cx| window.blur(cx));
-        cx.run_until_parked();
-        assert!(
-            terminal
-                .update(&mut cx, |terminal, _| terminal.take_pty_write_log())
-                .is_empty()
         );
     }
 

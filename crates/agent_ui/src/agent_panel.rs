@@ -154,6 +154,12 @@ fn terminal_program_to_report(
 pub struct TerminalId(uuid::Uuid);
 
 impl TerminalId {
+    pub(crate) fn from_herdr_name(name: &str) -> Self {
+        Self(uuid::Uuid::new_v5(
+            &uuid::Uuid::NAMESPACE_OID,
+            name.as_bytes(),
+        ))
+    }
     pub(crate) fn new() -> Self {
         Self(uuid::Uuid::new_v4())
     }
@@ -953,6 +959,7 @@ pub(crate) struct AgentThread {
 }
 
 struct AgentTerminal {
+    terminal_id: TerminalId,
     view: Entity<TerminalView>,
     title_editor: Option<Entity<Editor>>,
     title_editor_initial_title: Option<String>,
@@ -990,6 +997,14 @@ impl AgentTerminal {
     }
 
     fn terminal_title(&self, cx: &App) -> SharedString {
+        if let Some(store) = TerminalThreadMetadataStore::try_global(cx) {
+            let store = store.read(cx);
+            if store.session_name(self.terminal_id).is_some()
+                && let Some(row) = store.entry(self.terminal_id)
+            {
+                return row.title.clone();
+            }
+        }
         let title = self.current_terminal_title(cx);
         if title.is_empty() && !self.last_known_terminal_title.is_empty() {
             SharedString::from(self.last_known_terminal_title.clone())
@@ -1460,6 +1475,9 @@ impl AgentPanel {
     }
 
     pub(crate) fn new(workspace: &Workspace, _window: &mut Window, cx: &mut Context<Self>) -> Self {
+        if let Some(store) = TerminalThreadMetadataStore::try_global(cx) {
+            cx.observe(&store, |_, _, cx| cx.notify()).detach();
+        }
         let fs = workspace.app_state().fs.clone();
         let user_store = workspace.app_state().user_store.clone();
         let project = workspace.project();
@@ -1978,6 +1996,23 @@ impl AgentPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.new_terminal_with_command(
+            workspace,
+            Self::terminal_init_command(true, cx),
+            source,
+            window,
+            cx,
+        );
+    }
+
+    pub(crate) fn new_terminal_with_command(
+        &mut self,
+        workspace: Option<&Workspace>,
+        command: Option<String>,
+        source: AgentThreadSource,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if !self.supports_terminal(cx) {
             return;
         }
@@ -1991,7 +2026,7 @@ impl AgentPanel {
             None,
             true,
             true,
-            true,
+            command,
             source,
             window,
             cx,
@@ -2045,7 +2080,7 @@ impl AgentPanel {
         created_at: Option<DateTime<Utc>>,
         select: bool,
         focus: bool,
-        run_init_command: bool,
+        init_command: Option<String>,
         source: AgentThreadSource,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -2056,15 +2091,55 @@ impl AgentPanel {
         // as empty and spawning a second, "initial" terminal on activation.
         self.pending_terminal_spawn = Some(terminal_id);
         let terminal_working_directory = working_directory.clone();
-        let init_command = Self::terminal_init_command(run_init_command, cx);
-        let terminal_task = self.create_terminal_shell(working_directory, cx);
+        let herdr_session = if self.project.read(cx).is_local()
+            && AgentSettings::get_global(cx).threads_sidebar.herdr_sessions
+        {
+            let name = TerminalThreadMetadataStore::global(cx)
+                .read(cx)
+                .session_name(terminal_id)
+                .map(str::to_owned);
+            Some(name)
+        } else {
+            None
+        };
+        let local_selection = herdr_session.is_some();
+        let terminal_task = herdr_session
+            .is_none()
+            .then(|| self.create_terminal_shell(working_directory, cx));
         let workspace = self.workspace.clone();
         let workspace_id = self.workspace_id;
         let project = self.project.downgrade();
 
         cx.spawn_in(window, async move |this, cx| {
-            let terminal = match terminal_task.await {
-                Ok(terminal) => terminal,
+            let spawn = async {
+                if let Some(name) = herdr_session {
+                    let program = crate::herdr_sessions::attach_program(
+                        terminal_id,
+                        name.as_deref(),
+                        created_at.is_some(),
+                        terminal_working_directory.as_deref(),
+                    )
+                    .await?;
+                    let terminal = project
+                        .update(cx, |project, cx| {
+                            project.create_terminal_program(
+                                terminal_working_directory.clone(),
+                                program,
+                                cx,
+                            )
+                        })?
+                        .await?;
+                    // Herdr registers Zed's terminal colors before it forwards input from the attached PTY.
+                    let init_command =
+                        init_command.filter(|_| name.is_none() && created_at.is_none());
+                    anyhow::Ok((terminal, init_command))
+                } else {
+                    let terminal = terminal_task.context("Missing terminal shell")?.await?;
+                    Ok((terminal, init_command))
+                }
+            };
+            let (terminal, init_command) = match spawn.await {
+                Ok(result) => result,
                 Err(error) => {
                     log::error!("failed to spawn agent panel terminal: {error:#}");
                     workspace
@@ -2084,7 +2159,8 @@ impl AgentPanel {
                 let terminal_for_init_command = terminal.clone();
                 let terminal_view = cx.new(|cx| {
                     let mut view =
-                        TerminalView::new(terminal, workspace, workspace_id, project, window, cx);
+                        TerminalView::new(terminal, workspace, workspace_id, project, window, cx)
+                            .with_local_selection(local_selection);
                     view.set_show_workspace_actions(false, cx);
                     view
                 });
@@ -2249,6 +2325,7 @@ impl AgentPanel {
             .map(|title| title.to_string())
             .unwrap_or_default();
         let mut terminal = AgentTerminal {
+            terminal_id,
             view: terminal_view,
             title_editor: None,
             title_editor_initial_title: None,
@@ -2464,7 +2541,7 @@ impl AgentPanel {
             Some(metadata.created_at),
             true,
             focus,
-            true,
+            Self::terminal_init_command(true, cx),
             source,
             window,
             cx,
@@ -5238,7 +5315,7 @@ impl AgentPanel {
             None,
             true,
             false,
-            true,
+            Self::terminal_init_command(true, cx),
             source,
             window,
             cx,
@@ -5931,8 +6008,13 @@ impl AgentPanel {
 
             let focus_handle = focus_handle.clone();
             let agent_server_store = agent_server_store;
+            let panel = cx.weak_entity();
+            let local_terminal = supports_terminal && self.project.read(cx).is_local();
 
             Rc::new(move |window, cx| {
+                if local_terminal && AgentSettings::get_global(cx).threads_sidebar.herdr_sessions {
+                    return Some(crate::terminal_agent_menu::build(panel.clone(), window, cx));
+                }
                 Some(ContextMenu::build(window, cx, |menu, _window, cx| {
                     menu.context(focus_handle.clone())
                         .item(
@@ -7971,7 +8053,7 @@ mod tests {
                 None,
                 true,
                 true,
-                true,
+                AgentPanel::terminal_init_command(true, cx),
                 AgentThreadSource::AgentPanel,
                 window,
                 cx,

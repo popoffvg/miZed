@@ -1,0 +1,189 @@
+use std::path::{Path, PathBuf};
+
+use anyhow::Context as _;
+use chrono::DateTime;
+use collections::HashMap;
+use project::WorktreePaths;
+use serde::Deserialize;
+use workspace::PathList;
+
+use crate::{TerminalId, terminal_thread_metadata_store::TerminalThreadMetadata};
+
+#[derive(Debug, PartialEq)]
+pub(crate) struct HerdrSession {
+    pub name: String,
+    pub metadata: TerminalThreadMetadata,
+}
+
+#[derive(Deserialize)]
+struct DesktopTerminal {
+    address: String,
+    labels: HashMap<String, String>,
+    cwd: PathBuf,
+    last_cwd: Option<PathBuf>,
+    title: Option<String>,
+    name: Option<String>,
+    created_ms: i64,
+    state: String,
+}
+
+#[derive(Deserialize)]
+struct CoreSnapshot {
+    terminals: HashMap<String, DesktopTerminal>,
+}
+
+fn core_directory() -> PathBuf {
+    std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| paths::home_dir().join(".local/state"))
+        .join("herdr-core/default")
+}
+
+fn terminal_address(address: &str) -> anyhow::Result<&str> {
+    anyhow::ensure!(address.strip_prefix('t').is_some_and(|id| !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_alphanumeric())), "Invalid Herdr Desktop terminal address");
+    Ok(address)
+}
+
+pub(crate) async fn read_sessions() -> anyhow::Result<HashMap<TerminalId, HerdrSession>> {
+    let path = core_directory().join("terminals.json");
+    let contents = match std::fs::read(&path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(HashMap::default()),
+        Err(error) => return Err(error.into()),
+    };
+    desktop_sessions(&contents)
+}
+
+fn desktop_sessions(contents: &[u8]) -> anyhow::Result<HashMap<TerminalId, HerdrSession>> {
+    let snapshot: CoreSnapshot =
+        serde_json::from_slice(contents).context("Could not read Herdr Desktop terminals")?;
+    let mut sessions = HashMap::default();
+    for terminal in snapshot.terminals.into_values() {
+        if terminal.state != "live"
+            || !terminal.labels.contains_key("herdr.space")
+            || terminal.labels.contains_key("zed.closed")
+        {
+            continue;
+        }
+        let address = terminal_address(&terminal.address)?;
+        let id = terminal
+            .labels
+            .get("zed.thread")
+            .and_then(|id| TerminalId::from_key_string(id).ok())
+            .unwrap_or_else(|| TerminalId::from_herdr_name(address));
+        let directory = terminal
+            .last_cwd
+            .filter(|path| path.is_absolute())
+            .unwrap_or(terminal.cwd);
+        let title = terminal
+            .title
+            .filter(|title| !title.trim().is_empty())
+            .or(terminal.name)
+            .unwrap_or_else(|| address.to_owned());
+        sessions.insert(
+            id,
+            HerdrSession {
+                name: address.to_owned(),
+                metadata: TerminalThreadMetadata {
+                    terminal_id: id,
+                    title: title.into(),
+                    custom_title: None,
+                    created_at: DateTime::from_timestamp_millis(terminal.created_ms)
+                        .context("Invalid Herdr Desktop terminal creation time")?,
+                    worktree_paths: WorktreePaths::from_folder_paths(&PathList::new(&[&directory])),
+                    remote_connection: None,
+                    working_directory: Some(directory),
+                },
+            },
+        );
+    }
+    Ok(sessions)
+}
+
+async fn desktop_command(program: &str, arguments: &[&str]) -> anyhow::Result<Vec<u8>> {
+    let output = util::command::new_command(program)
+        .env_remove("HC_SOCKET")
+        .env_remove("HC_TERMINAL_ID")
+        .env("HC_SESSION", "default")
+        .args(arguments)
+        .output()
+        .await
+        .with_context(|| format!("Could not start {program}"))?;
+    anyhow::ensure!(
+        output.status.success(),
+        "{program} failed: {} {}",
+        String::from_utf8_lossy(&output.stderr).trim(),
+        String::from_utf8_lossy(&output.stdout).trim()
+    );
+    Ok(output.stdout)
+}
+
+pub(crate) async fn close_thread(address: &str) -> anyhow::Result<()> {
+    desktop_command(
+        "hc",
+        &["label", terminal_address(address)?, "zed.closed=true"],
+    )
+    .await?;
+    Ok(())
+}
+
+pub(crate) async fn attach_program(
+    id: TerminalId,
+    existing: Option<&str>,
+    restore: bool,
+    directory: Option<&Path>,
+) -> anyhow::Result<task::Shell> {
+    let address = if let Some(existing) = existing {
+        terminal_address(existing)?.to_owned()
+    } else {
+        anyhow::ensure!(
+            !restore,
+            "The Herdr Desktop terminal is no longer available"
+        );
+        let folder = directory.unwrap_or_else(|| paths::home_dir());
+        let folder = folder.to_str().context("Invalid Herdr Desktop folder")?;
+        let layout: serde_json::Value =
+            serde_json::from_slice(&desktop_command("herdr-app", &["ls"]).await?)?;
+        let spaces = layout
+            .get("spaces")
+            .unwrap_or(&layout)
+            .as_array()
+            .context("Could not read Herdr Desktop spaces")?;
+        let space = spaces
+            .iter()
+            .find(|space| {
+                space["folder"].as_str() == Some(folder)
+                    && space["machine"].as_str().unwrap_or_default().is_empty()
+            })
+            .and_then(|space| space["id"].as_str());
+        let mut arguments = serde_json::json!({"folder": folder, "focus": false});
+        let action = if let Some(space) = space {
+            arguments["space"] = space.into();
+            "tab.new"
+        } else {
+            "space.new"
+        };
+        let reply: serde_json::Value = serde_json::from_slice(
+            &desktop_command("herdr-app", &["do", action, &arguments.to_string()]).await?,
+        )?;
+        let address = terminal_address(
+            reply["terminal"]
+                .as_str()
+                .context("Herdr Desktop did not return a terminal address")?,
+        )?;
+        desktop_command("hc", &["label", address, &format!("zed.thread={id}")]).await?;
+        address.to_owned()
+    };
+    Ok(task::Shell::WithArguments {
+        program: "/usr/bin/env".into(),
+        args: vec![
+            "-u".into(),
+            "HC_SOCKET".into(),
+            "HC_SESSION=default".into(),
+            "hc".into(),
+            "attach".into(),
+            address,
+        ],
+        title_override: None,
+    })
+}

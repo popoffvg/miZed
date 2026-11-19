@@ -1197,6 +1197,7 @@
     "max_idle_retained_threads": 5,
     // Settings for the sidebar holding the agent panel and the list of agent threads.
     "threads_sidebar": {
+      "herdr_sessions": false,
       // Where to position the Threads Sidebar. Can be 'left' or 'right'.
       "position": "left",
       // Default width of the Threads Sidebar.
@@ -1404,6 +1405,7 @@
     //
     // Example: "terminal_init_command": "claude"
     "terminal_init_command": "",
+    "terminal_agent_commands": {},
     // How thinking blocks should be displayed by default in the agent panel.
     //
     // Default: auto

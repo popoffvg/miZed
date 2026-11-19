@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
 
+use crate::herdr_sessions::{self, HerdrSession};
+use agent_settings::AgentSettings;
 use anyhow::Context as _;
 use chrono::{DateTime, Utc};
 use collections::{HashMap, HashSet};
@@ -13,6 +15,7 @@ use db::{
 use futures::{FutureExt, future::Shared};
 use gpui::{AppContext as _, Entity, Global, Task};
 use remote::RemoteConnectionOptions;
+use settings::{Settings, SettingsStore};
 use ui::{App, Context, SharedString};
 use util::ResultExt as _;
 use workspace::PathList;
@@ -155,6 +158,8 @@ pub fn terminal_title_prefix(title: &str) -> Option<&str> {
 }
 
 pub struct TerminalThreadMetadataStore {
+    herdr_sessions: Option<HashMap<TerminalId, HerdrSession>>,
+    herdr_refresh: Option<Task<()>>,
     db: TerminalThreadMetadataDb,
     terminals: HashMap<TerminalId, TerminalThreadMetadata>,
     terminals_by_paths: HashMap<PathList, HashSet<TerminalId>>,
@@ -209,11 +214,22 @@ impl TerminalThreadMetadataStore {
     }
 
     pub fn entry(&self, terminal_id: TerminalId) -> Option<&TerminalThreadMetadata> {
+        if let Some(sessions) = &self.herdr_sessions {
+            return sessions.get(&terminal_id).map(|session| &session.metadata);
+        }
         self.terminals.get(&terminal_id)
     }
 
     pub fn entries(&self) -> impl Iterator<Item = &TerminalThreadMetadata> + '_ {
-        self.terminals.values()
+        self.terminals
+            .values()
+            .filter(|_| self.herdr_sessions.is_none())
+            .chain(
+                self.herdr_sessions
+                    .iter()
+                    .flat_map(|sessions| sessions.values())
+                    .map(|session| &session.metadata),
+            )
     }
 
     pub fn reload_task(&self) -> Shared<Task<()>> {
@@ -224,7 +240,7 @@ impl TerminalThreadMetadataStore {
 
     pub fn entries_for_path<'a>(
         &'a self,
-        path_list: &PathList,
+        path_list: &'a PathList,
         remote_connection: Option<&'a RemoteConnectionOptions>,
     ) -> impl Iterator<Item = &'a TerminalThreadMetadata> + 'a {
         self.terminals_by_paths
@@ -233,14 +249,24 @@ impl TerminalThreadMetadataStore {
             .flatten()
             .filter_map(|id| self.terminals.get(id))
             .filter(move |terminal| {
-                terminal.remote_connection.as_ref().map(|o| o.identity())
-                    == remote_connection.map(|o| o.identity())
+                self.herdr_sessions.is_none()
+                    && terminal.remote_connection.as_ref().map(|o| o.identity())
+                        == remote_connection.map(|o| o.identity())
             })
+            .chain(
+                self.herdr_sessions
+                    .iter()
+                    .flat_map(|sessions| sessions.keys())
+                    .filter_map(|id| self.entry(*id))
+                    .filter(move |row| {
+                        remote_connection.is_none() && row.folder_paths() == path_list
+                    }),
+            )
     }
 
     pub fn entries_for_main_worktree_path<'a>(
         &'a self,
-        path_list: &PathList,
+        path_list: &'a PathList,
         remote_connection: Option<&'a RemoteConnectionOptions>,
     ) -> impl Iterator<Item = &'a TerminalThreadMetadata> + 'a {
         self.terminals_by_main_paths
@@ -249,9 +275,19 @@ impl TerminalThreadMetadataStore {
             .flatten()
             .filter_map(|id| self.terminals.get(id))
             .filter(move |terminal| {
-                terminal.remote_connection.as_ref().map(|o| o.identity())
-                    == remote_connection.map(|o| o.identity())
+                self.herdr_sessions.is_none()
+                    && terminal.remote_connection.as_ref().map(|o| o.identity())
+                        == remote_connection.map(|o| o.identity())
             })
+            .chain(
+                self.herdr_sessions
+                    .iter()
+                    .flat_map(|sessions| sessions.keys())
+                    .filter_map(|id| self.entry(*id))
+                    .filter(move |row| {
+                        remote_connection.is_none() && row.main_worktree_paths() == path_list
+                    }),
+            )
     }
 
     pub fn path_is_referenced_by_terminal(
@@ -332,6 +368,14 @@ impl TerminalThreadMetadataStore {
     }
 
     fn save_internal(&mut self, metadata: TerminalThreadMetadata) {
+        if let Some(session) = self
+            .herdr_sessions
+            .as_mut()
+            .and_then(|sessions| sessions.get_mut(&metadata.terminal_id))
+        {
+            session.metadata.custom_title = metadata.custom_title.clone();
+            session.metadata.worktree_paths = metadata.worktree_paths.clone();
+        }
         if let Some(existing) = self.terminals.get(&metadata.terminal_id) {
             if existing.folder_paths() != metadata.folder_paths()
                 && let Some(ids) = self.terminals_by_paths.get_mut(existing.folder_paths())
@@ -372,6 +416,16 @@ impl TerminalThreadMetadataStore {
     }
 
     pub fn delete(&mut self, terminal_id: TerminalId, cx: &mut Context<Self>) {
+        if let Some(session) = self
+            .herdr_sessions
+            .as_mut()
+            .and_then(|sessions| sessions.remove(&terminal_id))
+        {
+            cx.background_spawn(async move {
+                herdr_sessions::close_thread(&session.name).await.log_err();
+            })
+            .detach();
+        }
         if let Some(terminal) = self.terminals.remove(&terminal_id) {
             if let Some(ids) = self.terminals_by_paths.get_mut(terminal.folder_paths()) {
                 ids.remove(&terminal_id);
@@ -416,6 +470,8 @@ impl TerminalThreadMetadataStore {
         });
 
         let mut this = Self {
+            herdr_sessions: None,
+            herdr_refresh: None,
             db,
             terminals: HashMap::default(),
             terminals_by_paths: HashMap::default(),
@@ -425,7 +481,88 @@ impl TerminalThreadMetadataStore {
             _db_operations_task,
         };
         this.reload(cx);
+        this.configure_herdr(cx);
+        cx.observe_global::<SettingsStore>(|this, cx| this.configure_herdr(cx))
+            .detach();
         this
+    }
+
+    pub(crate) fn session_name(&self, id: TerminalId) -> Option<&str> {
+        self.herdr_sessions
+            .as_ref()?
+            .get(&id)
+            .map(|session| session.name.as_str())
+    }
+
+    fn configure_herdr(&mut self, cx: &mut Context<Self>) {
+        let enabled = AgentSettings::try_get(cx)
+            .is_some_and(|settings| settings.threads_sidebar.herdr_sessions);
+        if enabled == self.herdr_sessions.is_some() {
+            return;
+        }
+        self.herdr_sessions = enabled.then(HashMap::default);
+        self.herdr_refresh = None;
+        cx.notify();
+        if !enabled {
+            return;
+        }
+        let database_loaded = self.reload_task();
+        let first = cx
+            .spawn(async move |this, cx| {
+                database_loaded.await;
+                let sessions = cx
+                    .background_spawn(herdr_sessions::read_sessions())
+                    .await
+                    .log_err();
+                this.update(cx, |this, cx| {
+                    if let Some(sessions) = sessions {
+                        this.update_herdr_sessions(sessions, cx);
+                    }
+                })
+                .ok();
+            })
+            .shared();
+        self.reload_task = Some(first.clone());
+        self.herdr_refresh = Some(cx.spawn(async move |this, cx| {
+            first.await;
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(3))
+                    .await;
+                if let Some(sessions) = cx
+                    .background_spawn(herdr_sessions::read_sessions())
+                    .await
+                    .log_err()
+                    && this
+                        .update(cx, |this, cx| {
+                            this.update_herdr_sessions(sessions, cx);
+                        })
+                        .is_err()
+                {
+                    break;
+                }
+            }
+        }));
+    }
+
+    fn update_herdr_sessions(
+        &mut self,
+        mut sessions: HashMap<TerminalId, HerdrSession>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(current) = &mut self.herdr_sessions else {
+            return;
+        };
+        for (id, session) in &mut sessions {
+            if let Some(local) = self.terminals.get(id) {
+                session.metadata.custom_title = local.custom_title.clone();
+                session.metadata.worktree_paths = local.worktree_paths.clone();
+            }
+        }
+        if *current != sessions {
+            *current = sessions;
+            cx.notify();
+        }
     }
 
     fn dedup_db_operations(operations: Vec<DbOperation>) -> Vec<DbOperation> {
@@ -687,6 +824,46 @@ mod tests {
 
         metadata.title = "Thinking".into();
         assert_eq!(metadata.display_title().as_ref(), "Fix bug");
+    }
+
+    #[gpui::test]
+    async fn test_herdr_project_rows_follow_session_membership(cx: &mut TestAppContext) {
+        init_test(cx);
+        let paths = PathList::new(&[Path::new("/repo")]);
+        let worktree = WorktreePaths::from_folder_paths(&paths);
+        let session = metadata("Build", worktree.clone());
+        let id = session.terminal_id;
+        cx.update(|cx| {
+            TerminalThreadMetadataStore::global(cx).update(cx, |store, cx| {
+                store.save(metadata("Local shell", worktree), cx);
+                let mut cached = session.clone();
+                cached.title = "Previous Codex title".into();
+                store.save(cached, cx);
+                let mut sessions = HashMap::default();
+                sessions.insert(
+                    id,
+                    HerdrSession {
+                        name: "build".into(),
+                        metadata: session,
+                    },
+                );
+                store.herdr_sessions = Some(HashMap::default());
+                store.update_herdr_sessions(sessions, cx);
+                assert_eq!(store.entries_for_path(&paths, None).count(), 1);
+                assert_eq!(
+                    store.entries().next().unwrap().display_title().as_ref(),
+                    "Build"
+                );
+                store.rename_terminal(id, "Compiler".into(), cx);
+                let titles: Vec<_> = store
+                    .entries_for_main_worktree_path(&paths, None)
+                    .map(TerminalThreadMetadata::display_title)
+                    .collect();
+                assert_eq!(titles, vec![SharedString::from("Compiler")]);
+                store.herdr_sessions = Some(HashMap::default());
+                assert!(store.entries_for_path(&paths, None).next().is_none());
+            });
+        });
     }
 
     #[gpui::test]

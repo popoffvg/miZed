@@ -556,6 +556,7 @@ dependencies = [
  "uuid",
  "vim",
  "watch",
+ "which",
  "workspace",
  "zed_actions",
 ]

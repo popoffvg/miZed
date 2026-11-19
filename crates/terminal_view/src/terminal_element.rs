@@ -945,8 +945,16 @@ impl TerminalElement {
         hitbox: &Hitbox,
         content_mode: &ContentMode,
         mouse_input_mode: MouseInputMode,
+        local_selection: bool,
         window: &mut Window,
     ) {
+        let input_mode = move |button| {
+            if local_selection && button == Some(MouseButton::Left) {
+                MouseInputMode::LocalSelection
+            } else {
+                mouse_input_mode
+            }
+        };
         let focus = self.focus.clone();
         let terminal = self.terminal.clone();
         let terminal_view = self.terminal_view.clone();
@@ -966,7 +974,7 @@ impl TerminalElement {
                     if scroll_top > Pixels::ZERO {
                         adjusted_event.position.y += scroll_top;
                     }
-                    terminal.mouse_down(&adjusted_event, mouse_input_mode, cx);
+                    terminal.mouse_down(&adjusted_event, input_mode(Some(MouseButton::Left)), cx);
                     cx.notify();
                 })
             }
@@ -984,7 +992,8 @@ impl TerminalElement {
                 if e.pressed_button.is_some() && !cx.has_active_drag() && focus.is_focused(window) {
                     let hovered = hitbox.is_hovered(window);
 
-                    let scroll_top = terminal_view.read(cx).scroll_top;
+                    let view = terminal_view.read(cx);
+                    let scroll_top = view.scroll_top;
                     terminal.update(cx, |terminal, cx| {
                         if terminal.selection_started() || hovered {
                             let mut adjusted_event = e.clone();
@@ -994,7 +1003,7 @@ impl TerminalElement {
                             terminal.mouse_drag(
                                 &adjusted_event,
                                 hitbox.bounds,
-                                mouse_input_mode,
+                                input_mode(e.pressed_button),
                                 cx,
                             );
                             cx.notify();
@@ -1004,13 +1013,14 @@ impl TerminalElement {
 
                 if hitbox.is_hovered(window) {
                     terminal.update(cx, |terminal, cx| {
-                        terminal.mouse_move(e, mouse_input_mode, cx);
+                        terminal.mouse_move(e, input_mode(e.pressed_button), cx);
                     })
                 }
             }
         });
 
         for button in [MouseButton::Left, MouseButton::Middle, MouseButton::Right] {
+            let mouse_input_mode = input_mode(Some(button));
             self.interactivity.on_mouse_up(button, {
                 let terminal = terminal.clone();
                 let focus = focus.clone();
@@ -1608,6 +1618,7 @@ impl Element for TerminalElement {
                 &layout.hitbox,
                 &layout.content_mode,
                 mouse_input_mode,
+                terminal_view.local_selection,
                 window,
             );
             if window.modifiers().secondary(cx)

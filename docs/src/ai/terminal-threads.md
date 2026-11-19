@@ -32,6 +32,40 @@ The CLI or TUI running inside the terminal owns its own:
 
 ## Opening a Terminal Thread {#opening-a-terminal-thread}
 
+### Store terminal threads in Herdr Desktop
+
+Open Herdr Desktop and make its `herdr-app` and `hc` commands available on your PATH. Enable Desktop terminals in Zed:
+
+```json [settings]
+{
+  "agent": {
+    "threads_sidebar": {
+      "herdr_sessions": true
+    }
+  }
+}
+```
+
+The Threads Sidebar shows Herdr sessions under their projects. Use the project’s **+** button to create a terminal thread. Select a row to attach in the Agent Panel. Rename and search threads with the usual sidebar controls. Closing a row removes it from the sidebar and detaches the client. Herdr keeps the session.
+
+Zed opens a tab in the Desktop space for the project folder. If the folder has no space, Zed creates one. Set `agent.terminal_init_command` to start an agent in the new terminal. Leave it empty for a shell prompt. Both apps attach to the same terminal. The sidebar refreshes its terminal title every three seconds. For Codex renames, include `thread-title` in the Codex `/title` picker.
+
+Use the **+** menu in the Agent Panel toolbar to choose a launch command for one thread. Choose **Terminal** for a plain shell, or select an entry under **Start an agent**. Press the number beside an agent to start it. Drag with the left mouse button to select terminal text.
+
+To customize a menu entry, set its executable name in `agent.terminal_agent_commands`. For example, this starts the `claudex` shell function when you select **Claude Code**:
+
+```json [settings]
+{
+  "agent": {
+    "terminal_agent_commands": {
+      "claude": "claudex"
+    }
+  }
+}
+```
+
+### Open a Zed terminal thread
+
 Open the new-thread menu from the [Agent Panel](./agent-panel.md) using the agent selector button on the left or the `+` icon in the top-right of the panel toolbar, then choose **Terminal**. The Terminal Thread opens in the panel body, just like switching to an agent thread.
 
 You can open as many Terminal Threads as you like. Each gets its own entry in the Threads Sidebar.

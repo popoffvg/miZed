@@ -113,10 +113,11 @@ unicode-script.workspace = true
 unicode-segmentation.workspace = true
 url.workspace = true
 util.workspace = true
-uuid.workspace = true
+uuid = { workspace = true, features = ["v5"] }
 watch.workspace = true
 workspace.workspace = true
 git_ui_core.workspace = true
+which.workspace = true
 zed_actions.workspace = true
 image.workspace = true
 reqwest_client = { workspace = true, optional = true }

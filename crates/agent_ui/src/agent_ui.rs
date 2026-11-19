@@ -13,6 +13,7 @@ mod diagnostics;
 pub mod draft_prompt_store;
 mod entry_view_state;
 mod external_source_prompt;
+mod herdr_sessions;
 mod inline_assistant;
 mod inline_prompt_editor;
 mod mention_set;
@@ -22,6 +23,7 @@ mod model_search;
 mod model_selector;
 mod model_selector_popover;
 mod profile_selector;
+mod terminal_agent_menu;
 mod terminal_codegen;
 mod terminal_inline_assistant;
 pub mod terminal_thread_metadata_store;
@@ -1078,6 +1080,7 @@ mod tests {
             expand_edit_card: true,
             expand_terminal_card: true,
             terminal_init_command: None,
+            terminal_agent_commands: Default::default(),
             cancel_generation_on_terminal_stop: true,
             use_modifier_to_send: true,
             message_editor_min_lines: 1,
@@ -1088,6 +1091,7 @@ mod tests {
             auto_generate_thread_titles: true,
             max_idle_retained_threads: 5,
             threads_sidebar: agent_settings::ThreadsSidebarSettings {
+                herdr_sessions: false,
                 auto_open: true,
                 default_width: px(300.),
                 position: settings::SidebarDockPosition::Left,

@@ -82,6 +82,7 @@ impl ContextMenuItem {
 }
 
 pub struct ContextMenuEntry {
+    shortcut: Option<gpui::Keystroke>,
     toggle: Option<(IconPosition, bool)>,
     label: SharedString,
     icon: Option<IconName>,
@@ -102,6 +103,10 @@ pub struct ContextMenuEntry {
 }
 
 impl ContextMenuEntry {
+    pub fn shortcut(mut self, shortcut: gpui::Keystroke) -> Self {
+        self.shortcut = Some(shortcut);
+        self
+    }
     pub fn new(label: impl Into<SharedString>) -> Self {
         ContextMenuEntry {
             toggle: None,
@@ -121,6 +126,7 @@ impl ContextMenuEntry {
             end_slot_title: None,
             end_slot_handler: None,
             show_end_slot_on_hover: false,
+            shortcut: None,
         }
     }
 
@@ -644,6 +650,7 @@ impl ContextMenu {
             end_slot_title: None,
             end_slot_handler: None,
             show_end_slot_on_hover: false,
+            shortcut: None,
         }));
         self
     }
@@ -675,6 +682,7 @@ impl ContextMenu {
             end_slot_title: Some(end_slot_title),
             end_slot_handler: Some(Rc::new(move |_, window, cx| end_slot_handler(window, cx))),
             show_end_slot_on_hover: false,
+            shortcut: None,
         }));
         self
     }
@@ -706,6 +714,7 @@ impl ContextMenu {
             end_slot_title: Some(end_slot_title),
             end_slot_handler: Some(Rc::new(move |_, window, cx| end_slot_handler(window, cx))),
             show_end_slot_on_hover: true,
+            shortcut: None,
         }));
         self
     }
@@ -750,6 +759,7 @@ impl ContextMenu {
             end_slot_title: None,
             end_slot_handler: None,
             show_end_slot_on_hover: false,
+            shortcut: None,
         }));
         self
     }
@@ -859,6 +869,7 @@ impl ContextMenu {
             end_slot_title: None,
             end_slot_handler: None,
             show_end_slot_on_hover: false,
+            shortcut: None,
         }));
         self
     }
@@ -892,6 +903,7 @@ impl ContextMenu {
             end_slot_title: None,
             end_slot_handler: None,
             show_end_slot_on_hover: false,
+            shortcut: None,
         }));
         self
     }
@@ -927,6 +939,7 @@ impl ContextMenu {
             end_slot_title: None,
             end_slot_handler: None,
             show_end_slot_on_hover: false,
+            shortcut: None,
         }));
         self
     }
@@ -1027,6 +1040,28 @@ impl ContextMenu {
 
     pub fn selected_index(&self) -> Option<usize> {
         self.selected_index
+    }
+
+    fn select_shortcut(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let index = self.items.iter().position(|item| {
+            let ContextMenuItem::Entry(entry) = item else {
+                return false;
+            };
+            !entry.disabled
+                && entry.shortcut.as_ref().is_some_and(|key| {
+                    key.key == event.keystroke.key && key.modifiers == event.keystroke.modifiers
+                })
+        });
+        if let Some(index) = index {
+            cx.stop_propagation();
+            self.select_index(index, window, cx);
+            self.confirm(&menu::Confirm, window, cx);
+        }
     }
 
     pub fn confirm(&mut self, _: &menu::Confirm, window: &mut Window, cx: &mut Context<Self>) {
@@ -1947,6 +1982,7 @@ impl ContextMenu {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let ContextMenuEntry {
+            shortcut,
             toggle,
             label,
             handler,
@@ -2197,6 +2233,10 @@ impl ContextMenu {
                             .w_full()
                             .justify_between()
                             .child(label_element)
+                            .children(shortcut.as_ref().map(|key| {
+                                Label::new(key.display(cx.platform_info().os).to_string())
+                                    .color(Color::Muted)
+                            }))
                             .debug_selector(|| format!("MENU_ITEM-{}", label))
                             .children(action.as_ref().map(|action| {
                                 let binding = self
@@ -2460,6 +2500,7 @@ impl Render for ContextMenu {
                         .overflow_y_scroll()
                         .track_focus(&self.focus_handle(cx))
                         .key_context(self.key_context.as_ref())
+                        .capture_key_down(cx.listener(Self::select_shortcut))
                         .on_action(cx.listener(ContextMenu::select_first))
                         .on_action(cx.listener(ContextMenu::handle_select_last))
                         .on_action(cx.listener(ContextMenu::select_next))
