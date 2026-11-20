@@ -40,6 +40,7 @@ itertools.workspace = true
 language.workspace = true
 language_model.workspace = true
 language_model_selector.workspace = true
+line_comments.workspace = true
 log.workspace = true
 markdown.workspace = true
 menu.workspace = true

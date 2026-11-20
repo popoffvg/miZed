@@ -18,7 +18,7 @@ This is a personal fork. I keep it because I want a few editor changes now, and 
 1. [Herdr Desktop terminals](#herdr-desktop-terminals): the Agent Panel and the Threads Sidebar show the terminals of Herdr Desktop
 2. [Terminal agent menu](#terminal-agent-menu): start Claude Code, Codex, Pi, OpenCode, Cursor, Amp, Crush, Copilot, or Gemini with one key
 3. [Inline input for language servers](#inline-input-for-language-servers): a language server asks for one line of text in a prompt under a line of the editor
-4. [Line comments in diffs](#line-comments-in-diffs): comment on lines of a commit or a diff from the keyboard
+4. [Line comments](#line-comments): comment on lines of a file, a diff, or a commit from the keyboard
 
 ### Herdr Desktop terminals
 
@@ -83,14 +83,16 @@ When miZed advertises `capabilities.experimental.zedInlineInput`, a language ser
 
 Enter sends the text as a JSON string. Escape cancels, and the result is `null`. The protocol is in [docs/src/extensions/languages.md](docs/src/extensions/languages.md).
 
-### Line comments in diffs
+### Line comments
 
-The `git: edit line comment` action (`git::EditLineComment`) opens the inline prompt under the selected lines of a commit view or a diff view. It reads and saves the comment with the `diff-comment` command of [line-comment-lsp](https://github.com/popoffvg/dotfiles/tree/main/harness/apps/line-comment). miZed looks for the tool in `~/.local/bin/line-comment-lsp`, then on your `PATH`. Bind the action in your keymap, for example:
+The `git: edit line comment` action (`git::EditLineComment`) opens the inline prompt under the selected lines of any file, diff view, or commit view. Enter saves the comment, and empty text deletes it. Each comment shows as a row under the last line it covers. A comment on a past commit ends with `read on <commit>`, because miZed keeps it on the line of the working tree.
+
+miZed keeps the comments of a workspace in `~/Library/Application Support/Zed/line_comments/<workspace id>.json`, keyed by the absolute path of each file. A change to that file shows at once. Bind the action in your keymap, for example:
 
 ```json
 [
   {
-    "context": "DiffEditor",
+    "context": "Editor",
     "bindings": { "cmd-.": "git::EditLineComment" }
   }
 ]

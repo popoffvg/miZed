@@ -7071,6 +7071,7 @@ dependencies = [
  "language",
  "language_model",
  "language_model_selector",
+ "line_comments",
  "log",
  "markdown",
  "menu",
@@ -9999,6 +10000,7 @@ name = "line_comments"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-channel 2.5.0",
  "collections",
  "editor",
  "fs",
@@ -10006,6 +10008,7 @@ dependencies = [
  "gpui",
  "language",
  "multi_buffer",
+ "paths",
  "project",
  "serde",
  "serde_json",
@@ -10014,6 +10017,7 @@ dependencies = [
  "theme_settings",
  "ui",
  "util",
+ "workspace",
 ]
 
 [[package]]
