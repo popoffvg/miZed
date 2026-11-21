@@ -6653,6 +6653,9 @@ impl Sidebar {
             Some(HerdrThreadStatus::Working) => {
                 (IconName::Terminal, Color::Muted, AgentThreadStatus::Running)
             }
+            Some(HerdrThreadStatus::Waiting) => {
+                (IconName::Clock, Color::Info, AgentThreadStatus::Completed)
+            }
             None => (
                 IconName::Terminal,
                 Color::Muted,

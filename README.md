@@ -40,7 +40,9 @@ With this setting, each terminal thread of the Agent Panel runs in a terminal of
 - Close a row to remove it from the sidebar. The Herdr terminal continues to run.
 - The terminal title comes from Herdr, and the sidebar reads it every three seconds.
 - The Threads Sidebar shows a green circle for Done, an amber warning for Needs Attention, and a muted circle for Idle. A spinner indicates work in progress.
-- A Claude triage hook can set `zed.claude_triage=question` with `hc label` when a reply needs an answer. Clear the label on the next prompt to restore the usual status.
+- A Claude triage hook can set `zed.claude_triage=question` with `hc label` when a reply needs an answer.
+- Use `zed.claude_triage=wait` when a background tool, agent, or workflow still runs. The sidebar shows a blue clock.
+- Clear the triage label when the next prompt starts or when Claude finishes the work.
 - Hold Shift and drag to select text when a terminal app uses the mouse.
 
 Herdr terminals are local. A remote project uses the usual Zed terminals.

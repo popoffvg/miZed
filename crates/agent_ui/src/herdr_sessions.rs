@@ -20,6 +20,7 @@ pub(crate) struct HerdrSession {
 pub enum HerdrThreadStatus {
     Idle,
     Working,
+    Waiting,
     Done,
     NeedsAttention,
 }
@@ -62,10 +63,12 @@ impl DesktopTerminal {
         let state = &status.state;
         match state {
             DesktopStatusState::Idle | DesktopStatusState::Done => {
-                if status.app.as_deref() == Some("claude-code")
-                    && self.labels.get("zed.claude_triage").map(String::as_str) == Some("question")
-                {
-                    return Some(HerdrThreadStatus::NeedsAttention);
+                if status.app.as_deref() == Some("claude-code") {
+                    match self.labels.get("zed.claude_triage").map(String::as_str) {
+                        Some("question") => return Some(HerdrThreadStatus::NeedsAttention),
+                        Some("wait") => return Some(HerdrThreadStatus::Waiting),
+                        _ => {}
+                    }
                 }
                 let seen = self
                     .labels
@@ -265,7 +268,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn claude_question_needs_attention_after_completion() {
+    fn claude_triage_sets_status_after_completion() {
         for (app, state, triage, expected) in [
             (
                 "claude-code",
@@ -286,6 +289,15 @@ mod tests {
                 HerdrThreadStatus::Working,
             ),
             ("claude-code", "done", "", HerdrThreadStatus::Done),
+            ("claude-code", "done", "wait", HerdrThreadStatus::Waiting),
+            ("claude-code", "idle", "wait", HerdrThreadStatus::Waiting),
+            ("claude-code", "working", "wait", HerdrThreadStatus::Working),
+            (
+                "claude-code",
+                "blocked",
+                "wait",
+                HerdrThreadStatus::NeedsAttention,
+            ),
             ("codex", "done", "question", HerdrThreadStatus::Done),
         ] {
             let terminal: DesktopTerminal = serde_json::from_value(serde_json::json!({
