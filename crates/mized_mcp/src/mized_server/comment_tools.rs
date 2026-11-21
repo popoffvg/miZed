@@ -1,20 +1,20 @@
-use std::{path::Path, rc::Rc, time::Duration};
+use std::{path::Path, time::Duration};
 
 use anyhow::{Context as _, Result, ensure};
 use context_server::{
     listener::{McpServerTool, ToolResponse},
     types::ToolAnnotations,
 };
-use futures::{FutureExt as _, channel::oneshot, lock::Mutex};
+use futures::{FutureExt as _, channel::oneshot};
 use gpui::{AsyncApp, Entity};
 use line_comments::{Author, CommentStore, CommentStoreName, LineComment};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::{mcp_response, mized_workspace};
+use super::{WorkspaceTarget, mcp_response, mized_workspace};
 
-#[derive(Clone, Default)]
-pub(super) struct AddComment(Rc<Mutex<()>>);
+#[derive(Clone)]
+pub(super) struct AddComment;
 
 #[derive(Clone)]
 pub(super) struct ReadComment;
@@ -24,8 +24,8 @@ pub(super) struct ListComments;
 
 #[derive(Deserialize, JsonSchema)]
 struct CommentStoreTarget {
-    /// ID of an open miZed workspace. Defaults to the active local workspace.
-    workspace_id: Option<i64>,
+    #[serde(flatten)]
+    workspace: WorkspaceTarget,
     /// Name of the workspace comment store. Defaults to "default".
     store: Option<String>,
 }
@@ -106,20 +106,12 @@ impl McpServerTool for AddComment {
             author: Author::Agent,
         };
 
-        let _write = self.0.lock().await;
         let store = open_comment_store(input.store, cx).await?;
         let save = cx.update(|cx| {
             store.update(cx, |store, cx| {
-                ensure!(
-                    !store
-                        .comments(&input.path)
-                        .iter()
-                        .any(|existing| existing.line == input.line),
-                    "A comment already starts on this line"
-                );
-                Ok(store.upsert(&input.path, comment.clone(), cx))
+                store.add_comment(&input.path, comment.clone(), cx)
             })
-        })?;
+        });
         save.await?;
         mcp_response(comment_result(&input.path, Some(&comment))?)
     }
@@ -195,7 +187,7 @@ async fn open_comment_store(
         .transpose()?
         .unwrap_or_default();
     let (store, readiness) = cx.update(|cx| -> Result<_> {
-        let (_, workspace) = mized_workspace(target.workspace_id, cx)?;
+        let (_, workspace) = mized_workspace(target.workspace.workspace_id, cx)?;
         let workspace = workspace.read(cx);
         let id = workspace
             .database_id()

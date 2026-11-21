@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
 };
 
@@ -126,12 +126,18 @@ fn comment_rows(
     project: &Project,
     cx: &App,
 ) -> Vec<CommentRow> {
-    let (open, done): (Vec<_>, Vec<_>) = comments.into_iter().partition(|comment| !comment.done);
+    let mut sections = HashMap::<_, Vec<_>>::default();
+    for comment in comments {
+        sections
+            .entry(CommentStatus::for_comment(&comment))
+            .or_default()
+            .push(comment);
+    }
     let mut rows = Vec::new();
-    for (status, mut comments) in [(CommentStatus::Open, open), (CommentStatus::Done, done)] {
-        if comments.is_empty() {
+    for status in CommentStatus::ALL {
+        let Some(mut comments) = sections.remove(&status) else {
             continue;
-        }
+        };
         rows.push(CommentRow {
             depth: 0,
             entry: CommentEntry::Status(status, comments.len()),

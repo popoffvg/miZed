@@ -124,7 +124,7 @@ tool_timeout_sec = 900
 
 - `add_comment`, `read_comment`, and `list_comments` use named stores per workspace. Pass `store` to select a named store. The default is `default`.
 - `open_file` opens an existing local file by absolute path. Set `wait_for_close` to wait for the tab to close.
-- `open_multibuffer` opens excerpts from local files in one editor tab. Give each excerpt an absolute path and an inclusive line range.
+- `open_multibuffer` opens excerpts from local files in one editor tab. Give each excerpt an absolute path and an inclusive line range. The tool groups excerpts from each file at that file's first position in the request.
 - `open_draft` opens supplied Markdown in an editor tab. Close the tab to return the edited text to the caller.
 
 Each tool accepts `workspace_id`. Omit it to use the active local workspace. Use the workspace ID if miZed has multiple open workspaces and is out of focus.

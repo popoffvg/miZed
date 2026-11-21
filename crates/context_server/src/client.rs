@@ -100,13 +100,46 @@ pub struct AnyRequest<'a> {
 }
 
 #[derive(Serialize, Deserialize)]
-struct AnyResponse<'a> {
+pub struct RpcResponse<'a> {
     jsonrpc: &'a str,
     id: RequestId,
     #[serde(default)]
     error: Option<Error>,
     #[serde(borrow)]
     result: Option<&'a RawValue>,
+}
+
+impl RpcResponse<'_> {
+    pub fn request_id(&self) -> &RequestId {
+        &self.id
+    }
+
+    pub fn result<T: DeserializeOwned>(self) -> Result<T> {
+        if let Some(error) = self.error {
+            return Err(anyhow!(error.message));
+        }
+        let result = self
+            .result
+            .context("Invalid response: no result or error")?;
+        Ok(serde_json::from_str(result.get())?)
+    }
+}
+
+pub fn encode_request(id: RequestId, method: &str, params: impl Serialize) -> Result<String> {
+    Ok(serde_json::to_string(&Request {
+        jsonrpc: JSON_RPC_VERSION,
+        id,
+        method,
+        params,
+    })?)
+}
+
+pub fn encode_notification(method: &str, params: impl Serialize) -> Result<String> {
+    Ok(serde_json::to_string(&Notification {
+        jsonrpc: JSON_RPC_VERSION,
+        method,
+        params,
+    })?)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -300,7 +333,7 @@ impl Client {
                         cx.clone(),
                     );
                 }
-            } else if let Ok(response) = serde_json::from_str::<AnyResponse>(&message) {
+            } else if let Ok(response) = serde_json::from_str::<RpcResponse>(&message) {
                 if let Some(handlers) = response_handlers.lock().as_mut()
                     && let Some(handler) = handlers.remove(&response.id)
                 {
@@ -406,13 +439,7 @@ impl Client {
         timeout: Option<Duration>,
     ) -> Result<T> {
         let id = self.next_id.fetch_add(1, SeqCst);
-        let request = serde_json::to_string(&Request {
-            jsonrpc: JSON_RPC_VERSION,
-            id: RequestId::Int(id),
-            method,
-            params,
-        })
-        .unwrap();
+        let request = encode_request(RequestId::Int(id), method, params)?;
 
         let (tx, rx) = oneshot::channel();
         let handle_response = self
@@ -461,16 +488,7 @@ impl Client {
                 let elapsed = started.elapsed();
                 log::trace!("took {elapsed:?} to receive response to {method:?} id {id}");
                 match response {
-                    Ok(response) => {
-                        let parsed: AnyResponse = serde_json::from_str(&response)?;
-                        if let Some(error) = parsed.error {
-                            Err(anyhow!(error.message))
-                        } else if let Some(result) = parsed.result {
-                            Ok(serde_json::from_str(result.get())?)
-                        } else {
-                            anyhow::bail!("Invalid response: no result or error");
-                        }
-                    }
+                    Ok(response) => serde_json::from_str::<RpcResponse>(&response)?.result(),
                     Err(_canceled) => {
                         if let Some(err) = self.last_transport_error.lock().take() {
                             return Err(err);
@@ -499,12 +517,7 @@ impl Client {
     /// Sends a notification to the context server without expecting a response.
     /// This function serializes the notification and sends it through the outbound channel.
     pub fn notify(&self, method: &str, params: impl Serialize) -> Result<()> {
-        let notification = serde_json::to_string(&Notification {
-            jsonrpc: JSON_RPC_VERSION,
-            method,
-            params,
-        })
-        .unwrap();
+        let notification = encode_notification(method, params)?;
         self.outbound_tx.try_send(notification)?;
         Ok(())
     }

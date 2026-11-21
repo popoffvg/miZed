@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, path::Path, path::PathBuf, sync::Arc, time::Dur
 use anyhow::Context as _;
 use collections::HashMap;
 use fs::Fs;
-use futures::StreamExt as _;
+use futures::{StreamExt as _, channel::oneshot};
 use gpui::{App, AppContext as _, Context, Entity, Global, Task, WeakEntity};
 use serde::{Deserialize, Serialize};
 use util::ResultExt as _;
@@ -11,16 +11,24 @@ use workspace::WorkspaceId;
 
 use crate::comment_store_path::{CommentStoreName, line_comment_store_path};
 
-const STORE_VERSION: u32 = 1;
+pub(crate) const STORE_VERSION: u32 = 1;
 const STORE_WATCH_LATENCY: Duration = Duration::from_millis(100);
 
 /// Comments in one named store, keyed by absolute file path.
 pub struct CommentStore {
-    path: PathBuf,
-    fs: Arc<dyn Fs>,
     files: BTreeMap<String, Vec<LineComment>>,
     loaded: bool,
+    revision: u64,
+    saved_revision: u64,
+    saves: async_channel::Sender<CommentSave>,
     _watch: Task<()>,
+}
+
+struct CommentSave {
+    store: Entity<CommentStore>,
+    revision: u64,
+    files: BTreeMap<String, Vec<LineComment>>,
+    reply: oneshot::Sender<anyhow::Result<()>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -82,11 +90,46 @@ impl CommentStore {
             return store;
         }
         let path = line_comment_store_path(workspace_id.into(), &key.1);
+        let (saves, pending_saves) = async_channel::unbounded();
+        let save_path = path.clone();
+        let save_fs = fs.clone();
+        cx.spawn(async move |cx| {
+            let mut recreate_folder = false;
+            while let Ok(CommentSave {
+                store,
+                revision,
+                files,
+                reply,
+            }) = pending_saves.recv().await
+            {
+                let path = save_path.clone();
+                let fs = save_fs.clone();
+                let result = cx
+                    .background_spawn(async move {
+                        if recreate_folder && let Some(folder) = path.parent() {
+                            fs.create_dir(folder).await?;
+                        }
+                        let text = serde_json::to_string_pretty(&StoreFile {
+                            version: STORE_VERSION,
+                            files,
+                        })?;
+                        fs.atomic_write(path, text).await
+                    })
+                    .await;
+                recreate_folder = result.is_err();
+                if result.is_ok() {
+                    store.update(cx, |store, _| store.saved_revision = revision);
+                }
+                reply.send(result).ok();
+            }
+        })
+        .detach();
         let store = cx.new(|cx| CommentStore {
-            path: path.clone(),
-            fs: fs.clone(),
             files: BTreeMap::new(),
             loaded: false,
+            revision: 0,
+            saved_revision: 0,
+            saves,
             _watch: cx.spawn(async move |store, cx| watch_store(store, path, fs, cx).await),
         });
         cx.default_global::<CommentStores>()
@@ -108,6 +151,24 @@ impl CommentStore {
 
     pub fn is_loaded(&self) -> bool {
         self.loaded
+    }
+
+    pub fn add_comment(
+        &mut self,
+        path: &str,
+        comment: LineComment,
+        cx: &mut Context<Self>,
+    ) -> Task<anyhow::Result<()>> {
+        if self
+            .comments(path)
+            .iter()
+            .any(|existing| existing.line == comment.line)
+        {
+            return Task::ready(Err(anyhow::anyhow!(
+                "A comment already starts on this line"
+            )));
+        }
+        self.upsert(path, comment, cx)
     }
 
     /// Replace the comment that starts on the same line, or add it, and save the store.
@@ -138,7 +199,7 @@ impl CommentStore {
         else {
             return Task::ready(Err(anyhow::anyhow!("The line comment no longer exists")));
         };
-        if comment.done == done {
+        if comment.done == done && self.revision == self.saved_revision {
             return Task::ready(Ok(()));
         }
         comment.done = done;
@@ -163,17 +224,26 @@ impl CommentStore {
 
     fn save(&mut self, cx: &mut Context<Self>) -> Task<anyhow::Result<()>> {
         cx.notify();
-        let text = serde_json::to_string_pretty(&StoreFile {
-            version: STORE_VERSION,
-            files: self.files.clone(),
-        });
-        let path = self.path.clone();
-        let fs = self.fs.clone();
-        cx.background_spawn(async move {
-            if let Some(folder) = path.parent() {
-                fs.create_dir(folder).await?;
-            }
-            fs.atomic_write(path, text?).await
+        self.revision += 1;
+        let (reply, result) = oneshot::channel();
+        if self
+            .saves
+            .try_send(CommentSave {
+                store: cx.entity(),
+                revision: self.revision,
+                files: self.files.clone(),
+                reply,
+            })
+            .is_err()
+        {
+            return Task::ready(Err(anyhow::anyhow!(
+                "The line comment save queue is closed"
+            )));
+        }
+        cx.spawn(async move |_, _| {
+            result
+                .await
+                .context("The line comment save did not complete")?
         })
     }
 }
@@ -190,9 +260,17 @@ async fn watch_store(
     fs.create_dir(folder).await.log_err();
     let (mut events, _watcher) = fs.watch(folder, STORE_WATCH_LATENCY).await;
     loop {
+        let Ok(revision) = store.read_with(cx, |store, _| {
+            (store.revision == store.saved_revision).then_some(store.revision)
+        }) else {
+            return;
+        };
         let files = load_store(fs.as_ref(), &path).await.log_err();
         if store
             .update(cx, |store, cx| {
+                if revision != Some(store.revision) {
+                    return;
+                }
                 store.loaded = files.is_some();
                 if let Some(files) = files {
                     store.files = files;

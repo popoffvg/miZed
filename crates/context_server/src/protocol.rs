@@ -38,27 +38,15 @@ impl ModelContextProtocol {
         self,
         client_info: types::Implementation,
     ) -> Result<InitializedContextServerProtocol> {
-        let params = types::InitializeParams {
-            protocol_version: types::ProtocolVersion(types::LATEST_PROTOCOL_VERSION.to_string()),
-            capabilities: types::ClientCapabilities {
-                experimental: None,
-                sampling: None,
-                roots: None,
-            },
-            meta: None,
-            client_info,
-        };
-
         let response: types::InitializeResponse = self
             .inner
-            .request(types::requests::Initialize::METHOD, params)
+            .request(
+                types::requests::Initialize::METHOD,
+                initialize_parameters(client_info),
+            )
             .await?;
 
-        anyhow::ensure!(
-            Self::supported_protocols().contains(&response.protocol_version),
-            "Unsupported protocol version: {:?}",
-            response.protocol_version
-        );
+        check_protocol_version(&response.protocol_version)?;
 
         log::trace!("mcp server info {:?}", response.server_info);
 
@@ -76,6 +64,27 @@ impl ModelContextProtocol {
 
         Ok(initialized_protocol)
     }
+}
+
+pub fn initialize_parameters(client_info: types::Implementation) -> types::InitializeParams {
+    types::InitializeParams {
+        protocol_version: types::ProtocolVersion(types::LATEST_PROTOCOL_VERSION.to_string()),
+        capabilities: types::ClientCapabilities {
+            experimental: None,
+            sampling: None,
+            roots: None,
+        },
+        meta: None,
+        client_info,
+    }
+}
+
+pub fn check_protocol_version(version: &types::ProtocolVersion) -> Result<()> {
+    anyhow::ensure!(
+        ModelContextProtocol::supported_protocols().contains(version),
+        "Unsupported protocol version: {version:?}",
+    );
+    Ok(())
 }
 
 pub struct InitializedContextServerProtocol {

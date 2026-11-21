@@ -15,6 +15,16 @@ mod unix {
     };
 
     use anyhow::{Context as _, Result, bail, ensure};
+    use context_server::{
+        client::{RequestId, RpcResponse, encode_notification, encode_request},
+        protocol::{check_protocol_version, initialize_parameters},
+        types::{
+            Implementation, InitializeResponse, Notification as _, Request as _,
+            notifications::Initialized,
+            requests::{CallTool, Initialize, ListTools},
+        },
+    };
+    use serde::{Serialize, de::DeserializeOwned};
     use serde_json::{Value, json};
 
     const USAGE: &str = "Usage: mized-mcp ADDRESS_FILE [list | call TOOL [JSON | -]]\n\
@@ -32,7 +42,7 @@ mod unix {
         let request = match command {
             None => None,
             Some(command) if command == "list" && arguments.next().is_none() => {
-                Some(("tools/list", json!({})))
+                Some((ListTools::METHOD, json!({})))
             }
             Some(command) if command == "call" => {
                 let name = arguments.next().context(USAGE)?;
@@ -57,7 +67,10 @@ mod unix {
                     input.is_object(),
                     "Pass miZed MCP tool arguments as a JSON object"
                 );
-                Some(("tools/call", json!({ "name": name, "arguments": input })))
+                Some((
+                    CallTool::METHOD,
+                    json!({ "name": name, "arguments": input }),
+                ))
             }
             _ => bail!("{USAGE}"),
         };
@@ -101,22 +114,24 @@ mod unix {
 
     fn run_mcp_request(socket: UnixStream, method: &str, parameters: Value) -> Result<()> {
         let mut socket = BufReader::new(socket);
-        read_mcp_result(
+        let response: InitializeResponse = read_mcp_result(
             &mut socket,
             1,
-            "initialize",
-            json!({
-                "protocolVersion": "2025-06-18",
-                "capabilities": {},
-                "clientInfo": { "name": "mized-mcp", "version": env!("CARGO_PKG_VERSION") }
+            Initialize::METHOD,
+            initialize_parameters(Implementation {
+                name: "mized-mcp".to_string(),
+                version: env!("CARGO_PKG_VERSION").to_string(),
+                title: None,
+                description: None,
             }),
         )?;
+        check_protocol_version(&response.protocol_version)?;
         writeln!(
             socket.get_mut(),
             "{}",
-            json!({ "jsonrpc": "2.0", "method": "notifications/initialized" })
+            encode_notification(Initialized::METHOD, ())?
         )?;
-        let result = read_mcp_result(&mut socket, 2, method, parameters)?;
+        let result: Value = read_mcp_result(&mut socket, 2, method, parameters)?;
         if result.get("isError").and_then(Value::as_bool) == Some(true) {
             bail!("miZed MCP tool failed: {}", result["content"]);
         }
@@ -129,17 +144,15 @@ mod unix {
         Ok(())
     }
 
-    fn read_mcp_result(
+    fn read_mcp_result<T: DeserializeOwned>(
         socket: &mut BufReader<UnixStream>,
-        id: u8,
+        id: i32,
         method: &str,
-        parameters: Value,
-    ) -> Result<Value> {
-        writeln!(
-            socket.get_mut(),
-            "{}",
-            json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": parameters })
-        )?;
+        parameters: impl Serialize,
+    ) -> Result<T> {
+        let request_id = RequestId::Int(id);
+        let request = encode_request(request_id.clone(), method, parameters)?;
+        writeln!(socket.get_mut(), "{request}")?;
         let mut line = String::new();
         loop {
             line.clear();
@@ -147,18 +160,13 @@ mod unix {
                 socket.read_line(&mut line)? != 0,
                 "miZed MCP disconnected during {method}"
             );
-            let mut response: Value =
-                serde_json::from_str(&line).context("Could not parse the miZed MCP response")?;
-            if response.get("id").and_then(Value::as_u64) != Some(u64::from(id)) {
-                continue;
+            if let Ok(response) = serde_json::from_str::<RpcResponse>(&line)
+                && response.request_id() == &request_id
+            {
+                return response
+                    .result()
+                    .with_context(|| format!("miZed MCP request {method} failed"));
             }
-            if let Some(error) = response.get("error") {
-                bail!("miZed MCP request {method} failed: {error}");
-            }
-            return response
-                .as_object_mut()
-                .and_then(|response| response.remove("result"))
-                .context("The miZed MCP response has no result");
         }
     }
 }

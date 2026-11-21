@@ -4,7 +4,7 @@ use std::{
 };
 
 use editor::{
-    Editor,
+    Editor, MultiBuffer, PathKey,
     actions::{Backspace, Newline, NewlineBelow, SelectAll},
     display_map::{Block, BlockId},
     test::editor_content_with_blocks,
@@ -20,7 +20,11 @@ use settings::SettingsStore;
 use util::path;
 use workspace::MultiWorkspace;
 
-use crate::{AddLineComment, EditLineComment, ListLineComments, SelectLineCommentStore};
+use crate::{
+    AddLineComment, Author, CommentStoreName, EditLineComment, LineComment, ListLineComments,
+    SelectLineCommentStore, comment_store::STORE_VERSION,
+    comment_store_path::line_comment_store_path,
+};
 
 const FILE: &str = path!("/root/a.rs");
 const LOOSE_FILE: &str = path!("/skills/notes/SKILL.md");
@@ -36,7 +40,7 @@ fn init_test(cx: &mut TestAppContext) {
 }
 
 fn store_text(comments: serde_json::Value) -> String {
-    json!({ "version": 1, "files": { FILE: comments } }).to_string()
+    json!({ "version": STORE_VERSION, "files": { FILE: comments } }).to_string()
 }
 
 async fn stored_comments(fs: &FakeFs, store_path: &Path) -> serde_json::Value {
@@ -71,9 +75,7 @@ pub(super) async fn open_file(
         workspace.set_random_database_id();
         workspace.database_id().unwrap()
     });
-    let store_path = paths::data_dir()
-        .join("line_comments")
-        .join(format!("{}.json", i64::from(workspace_id)));
+    let store_path = line_comment_store_path(workspace_id.into(), &CommentStoreName::default());
     if let Some(store) = store {
         fs.create_dir(store_path.parent().unwrap()).await.unwrap();
         fs.insert_file(&store_path, store_text(store).into_bytes())
@@ -90,6 +92,129 @@ pub(super) async fn open_file(
     });
     cx.run_until_parked();
     (fs, editor, store_path, cx)
+}
+
+#[gpui::test(iterations = 12)]
+async fn test_overlapping_comment_saves_keep_both_comments(cx: &mut TestAppContext) {
+    let (fs, editor, store_path, mut cx) = open_file(FILE, None, cx).await;
+    let store = editor.read_with(&cx, |editor, _| {
+        crate::editor_comment_store(editor).unwrap()
+    });
+    let (first, second) = store.update(&mut cx, |store, cx| {
+        let add = |store: &mut crate::CommentStore, line, cx: &mut gpui::Context<_>| {
+            store.add_comment(
+                FILE,
+                LineComment {
+                    line,
+                    end_line: None,
+                    text: line.to_string(),
+                    done: false,
+                    orphaned: false,
+                    author: Author::Human,
+                },
+                cx,
+            )
+        };
+        (add(store, 1, cx), add(store, 2, cx))
+    });
+    first.await.unwrap();
+    second.await.unwrap();
+    assert_eq!(
+        stored_comments(&fs, &store_path).await["files"][FILE]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|comment| comment["line"].as_u64().unwrap())
+            .collect::<Vec<_>>(),
+        [1, 2]
+    );
+    cx.run_until_parked();
+    assert_eq!(
+        store.read_with(&cx, |store, _| store.comments(FILE).len()),
+        2
+    );
+}
+
+#[gpui::test]
+async fn test_done_comment_retries_after_save_failure(cx: &mut TestAppContext) {
+    let (fs, editor, store_path, mut cx) =
+        open_file(FILE, Some(json!([{ "line": 1, "text": "review" }])), cx).await;
+    let store = editor.read_with(&cx, |editor, _| {
+        crate::editor_comment_store(editor).unwrap()
+    });
+    fs.remove_file(&store_path, Default::default())
+        .await
+        .unwrap();
+    fs.create_dir(&store_path).await.unwrap();
+    let save = |cx: &mut VisualTestContext| {
+        store.update(cx, |store, cx| store.set_comment_done(FILE, 1, true, cx))
+    };
+    assert!(save(&mut cx).await.is_err());
+    fs.remove_dir(&store_path, Default::default())
+        .await
+        .unwrap();
+    save(&mut cx).await.unwrap();
+    assert_eq!(
+        stored_comments(&fs, &store_path).await["files"][FILE][0]["done"],
+        true
+    );
+}
+
+#[gpui::test]
+async fn test_comment_spanning_past_excerpt_shows_in_excerpt(cx: &mut TestAppContext) {
+    let (_, editor, _, mut cx) = open_file(
+        FILE,
+        Some(json!([{ "line": 1, "end_line": 4, "text": "review" }])),
+        cx,
+    )
+    .await;
+    let workspace = editor.read_with(&cx, |editor, _| editor.workspace().unwrap());
+    let project = editor.read_with(&cx, |editor, _| editor.project().unwrap().clone());
+    let buffer = project
+        .update(&mut cx, |project, cx| project.open_local_buffer(FILE, cx))
+        .await
+        .unwrap();
+    let next_buffer = project
+        .update(&mut cx, |project, cx| {
+            project.open_local_buffer(LOOSE_FILE, cx)
+        })
+        .await
+        .unwrap();
+    let multibuffer = cx.new_window_entity(|_, cx| {
+        let mut multibuffer = MultiBuffer::new(project.read(cx).capability());
+        multibuffer.set_excerpts_for_path(
+            PathKey::sorted(0),
+            buffer,
+            [Point::new(1, 0)..Point::new(2, 5)],
+            0,
+            cx,
+        );
+        multibuffer.set_excerpts_for_path(
+            PathKey::sorted(1),
+            next_buffer,
+            [Point::new(0, 0)..Point::new(0, 3)],
+            0,
+            cx,
+        );
+        multibuffer
+    });
+    let excerpt = cx.new_window_entity(|window, cx| {
+        Editor::for_multibuffer(multibuffer, Some(project), window, cx)
+    });
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        workspace.add_item_to_active_pane(Box::new(excerpt.clone()), None, true, window, cx);
+    });
+    cx.run_until_parked();
+    excerpt.read_with(&cx, |editor, cx| {
+        assert_eq!(
+            editor
+                .highlighted_rows::<crate::LineCommentTargetHighlights>(cx)
+                .count(),
+            1
+        );
+    });
+    let content = editor_content_with_blocks(&excerpt, &mut cx);
+    assert!(content.contains("§ review"), "{content}");
 }
 
 #[gpui::test]
@@ -264,7 +389,7 @@ async fn test_prompt_writes_changes_and_deletes_a_comment(cx: &mut TestAppContex
     submit("rename\nwith reason", &mut cx);
     assert_eq!(
         stored_comments(&fs, &store_path).await,
-        json!({ "version": 1, "files": { FILE: [
+        json!({ "version": STORE_VERSION, "files": { FILE: [
             { "line": 2, "end_line": 3, "text": "rename\nwith reason", "orphaned": false, "author": "human" },
         ] } })
     );
@@ -320,7 +445,7 @@ async fn test_prompt_writes_changes_and_deletes_a_comment(cx: &mut TestAppContex
     submit("", &mut cx);
     assert_eq!(
         stored_comments(&fs, &store_path).await,
-        json!({ "version": 1, "files": {} })
+        json!({ "version": STORE_VERSION, "files": {} })
     );
     assert_eq!(
         editor_content_with_blocks(&editor, &mut cx),
@@ -395,7 +520,7 @@ async fn test_file_outside_the_workspace_folders_uses_the_workspace_store(cx: &m
     cx.run_until_parked();
     assert_eq!(
         stored_comments(&fs, &store_path).await,
-        json!({ "version": 1, "files": { LOOSE_FILE: [
+        json!({ "version": STORE_VERSION, "files": { LOOSE_FILE: [
             { "line": 1, "text": "tighten", "orphaned": false, "author": "human" },
         ] } })
     );

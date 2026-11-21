@@ -219,6 +219,17 @@ impl CommitView {
         &self.repository
     }
 
+    pub fn working_tree_path(&self, buffer: &Buffer, cx: &App) -> Option<PathBuf> {
+        self.multibuffer.read(cx).buffer(buffer.remote_id())?;
+        let file = buffer.file()?;
+        Some(
+            self.repository
+                .read(cx)
+                .work_directory_abs_path
+                .join(file.path().as_std_path()),
+        )
+    }
+
     fn open_with_options(
         commit_sha: String,
         repo: WeakEntity<Repository>,

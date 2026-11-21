@@ -1,19 +1,22 @@
-use std::{collections::HashMap, path::PathBuf};
+use std::{
+    collections::{HashMap, HashSet, hash_map::Entry},
+    path::PathBuf,
+};
 
 use anyhow::{Context as _, Result, ensure};
 use context_server::listener::{McpServerTool, ToolResponse};
 use editor::{Editor, MultiBuffer, PathKey};
-use futures::channel::oneshot;
+use futures::{StreamExt as _, channel::oneshot, stream};
 use gpui::{
-    App, AppContext as _, AsyncApp, Context, Entity, EventEmitter, FocusHandle, Focusable,
-    IntoElement, Render, SharedString, Window,
+    App, AppContext as _, AsyncApp, Context, Entity, EntityId, EventEmitter, FocusHandle,
+    Focusable, IntoElement, Render, SharedString, Window,
 };
 use language::{Buffer, Point};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use workspace::{OpenOptions, item::Item};
+use workspace::{OpenOptions, Workspace, item::Item};
 
-use super::{mcp_response, mized_workspace};
+use super::{WorkspaceTarget, mcp_response, mized_workspace};
 
 #[derive(Clone)]
 pub(super) struct OpenFile;
@@ -27,8 +30,8 @@ pub(super) struct OpenMultibuffer;
 /// Open an existing local file in miZed.
 #[derive(Deserialize, JsonSchema)]
 pub(super) struct OpenFileInput {
-    /// ID of an open miZed workspace. Defaults to the active local workspace.
-    workspace_id: Option<i64>,
+    #[serde(flatten)]
+    workspace: WorkspaceTarget,
     path: PathBuf,
     /// Wait until the user closes the file tab.
     wait_for_close: Option<bool>,
@@ -37,17 +40,17 @@ pub(super) struct OpenFileInput {
 /// Open Markdown text in miZed and return the edited text when the user closes the tab.
 #[derive(Deserialize, JsonSchema)]
 pub(super) struct OpenDraftInput {
-    /// ID of an open miZed workspace. Defaults to the active local workspace.
-    workspace_id: Option<i64>,
+    #[serde(flatten)]
+    workspace: WorkspaceTarget,
     title: String,
     text: String,
 }
 
-/// Open excerpts from local files in one miZed editor tab.
+/// Open excerpts in one miZed editor tab. Group excerpts from the same file.
 #[derive(Deserialize, JsonSchema)]
 pub(super) struct OpenMultibufferInput {
-    /// ID of an open miZed workspace. Defaults to the active local workspace.
-    workspace_id: Option<i64>,
+    #[serde(flatten)]
+    workspace: WorkspaceTarget,
     title: String,
     excerpts: Vec<MultibufferExcerpt>,
 }
@@ -91,7 +94,8 @@ impl McpServerTool for OpenFile {
             input.path.is_absolute(),
             "Use an absolute path to open a file in miZed"
         );
-        let (window, workspace) = cx.update(|cx| mized_workspace(input.workspace_id, cx))?;
+        let (window, workspace) =
+            cx.update(|cx| mized_workspace(input.workspace.workspace_id, cx))?;
         let fs = cx.update(|cx| workspace.read(cx).app_state().fs.clone());
         let metadata = fs.metadata(&input.path).await?;
         ensure!(
@@ -107,20 +111,9 @@ impl McpServerTool for OpenFile {
         })?;
         let item = task.await?;
         if input.wait_for_close == Some(true) {
-            let (sender, receiver) = oneshot::channel();
-            let _subscription = cx.update(|cx| {
-                let subscription = item.on_release(
-                    cx,
-                    Box::new(move |_| {
-                        sender.send(()).ok();
-                    }),
-                );
-                drop(item);
-                subscription
-            });
-            receiver
-                .await
-                .context("miZed did not report that the file closed")?;
+            let item_id = item.item_id();
+            drop(item);
+            wait_for_tab_close(workspace, item_id, cx).await?;
         }
         mcp_response(OpenedFile { path: input.path })
     }
@@ -144,15 +137,15 @@ impl McpServerTool for OpenMultibuffer {
             !input.excerpts.is_empty(),
             "Provide at least one miZed multibuffer excerpt"
         );
-        let (window, workspace) = cx.update(|cx| mized_workspace(input.workspace_id, cx))?;
+        let (window, workspace) =
+            cx.update(|cx| mized_workspace(input.workspace.workspace_id, cx))?;
         let (project, fs) = workspace.read_with(cx, |workspace, _| {
             (
                 workspace.project().clone(),
                 workspace.app_state().fs.clone(),
             )
         });
-        let mut excerpts = HashMap::new();
-        for (index, excerpt) in input.excerpts.into_iter().enumerate() {
+        for excerpt in &input.excerpts {
             ensure!(
                 excerpt.path.is_absolute(),
                 "Use an absolute path for each miZed excerpt"
@@ -161,30 +154,57 @@ impl McpServerTool for OpenMultibuffer {
                 excerpt.start_line > 0 && excerpt.start_line <= excerpt.end_line,
                 "Use an inclusive line range that starts at 1 or later"
             );
-            ensure!(
-                fs.metadata(&excerpt.path)
-                    .await?
-                    .is_some_and(|metadata| !metadata.is_dir),
-                "The miZed excerpt file does not exist: {}",
-                excerpt.path.display()
-            );
-            let buffer = project
-                .update(cx, |project, cx| {
-                    project.open_local_buffer(&excerpt.path, cx)
+        }
+        let mut paths = HashSet::new();
+        {
+            let paths = input
+                .excerpts
+                .iter()
+                .map(|excerpt| &excerpt.path)
+                .filter(|path| paths.insert(*path));
+            let checks = stream::iter(paths)
+                .map(|path| {
+                    let fs = &fs;
+                    async move {
+                        ensure!(
+                            fs.metadata(path)
+                                .await?
+                                .is_some_and(|metadata| !metadata.is_dir),
+                            "The miZed excerpt file does not exist: {}",
+                            path.display()
+                        );
+                        anyhow::Ok(())
+                    }
                 })
-                .await?;
+                .buffered(8);
+            futures::pin_mut!(checks);
+            while let Some(result) = checks.next().await {
+                result?;
+            }
+        }
+        let mut excerpts = HashMap::new();
+        let mut buffers = HashMap::new();
+        for (index, excerpt) in input.excerpts.into_iter().enumerate() {
+            let buffer = match buffers.entry(excerpt.path) {
+                Entry::Occupied(entry) => entry.into_mut(),
+                Entry::Vacant(entry) => {
+                    let task = project
+                        .update(cx, |project, cx| project.open_local_buffer(entry.key(), cx));
+                    entry.insert(task.await?)
+                }
+            };
             let range = buffer.read_with(cx, |buffer, _| {
                 let start = excerpt.start_line - 1;
                 let end = excerpt.end_line - 1;
                 ensure!(
                     end <= buffer.max_point().row,
-                    "The miZed excerpt ends past the file: {}",
-                    excerpt.path.display()
+                    "The miZed excerpt {} ends past the file",
+                    index + 1,
                 );
                 Ok::<_, anyhow::Error>(Point::new(start, 0)..Point::new(end, buffer.line_len(end)))
             })?;
             excerpts
-                .entry(buffer)
+                .entry(buffer.clone())
                 .or_insert_with(|| (PathKey::sorted(index as u64), Vec::new()))
                 .1
                 .push(range);
@@ -230,11 +250,11 @@ impl McpServerTool for OpenDraft {
             !input.title.trim().is_empty(),
             "Enter a title for the miZed draft"
         );
-        let (window, workspace) = cx.update(|cx| mized_workspace(input.workspace_id, cx))?;
+        let (window, workspace) =
+            cx.update(|cx| mized_workspace(input.workspace.workspace_id, cx))?;
         let languages = cx.update(|cx| workspace.read(cx).app_state().languages.clone());
         let markdown = languages.language_for_name("Markdown").await?;
-        let (sender, receiver) = oneshot::channel();
-        window.update(cx, |root, window, cx| {
+        let (item_id, buffer) = window.update(cx, |root, window, cx| {
             root.activate(workspace.clone(), None, window, cx);
             let buffer = cx.new(|cx| {
                 let mut buffer = Buffer::local(input.text, cx);
@@ -243,24 +263,50 @@ impl McpServerTool for OpenDraft {
             });
             let draft = cx.new(|cx| {
                 let editor = cx.new(|cx| Editor::for_buffer(buffer.clone(), None, window, cx));
-                cx.on_release(move |_, cx| {
-                    sender.send(buffer.read(cx).text()).ok();
-                })
-                .detach();
                 DraftTab {
                     title: input.title.into(),
                     editor,
                 }
             });
+            let item_id = draft.entity_id();
             workspace.update(cx, |workspace, cx| {
                 workspace.add_item_to_active_pane(Box::new(draft), None, true, window, cx);
             });
+            (item_id, buffer)
         })?;
-        let text = receiver
-            .await
-            .context("miZed did not return the draft text")?;
+        wait_for_tab_close(workspace, item_id, cx).await?;
+        let text = buffer.read_with(cx, |buffer, _| buffer.text());
         mcp_response(EditedDraft { text })
     }
+}
+
+async fn wait_for_tab_close(
+    workspace: Entity<Workspace>,
+    item_id: EntityId,
+    cx: &mut AsyncApp,
+) -> Result<()> {
+    let (sender, receiver) = oneshot::channel();
+    let subscription = cx.update(|cx| {
+        if workspace.read(cx).pane_for_item_id(item_id).is_none() {
+            return None;
+        }
+        let mut sender = Some(sender);
+        Some(cx.subscribe(&workspace, move |workspace, event, cx| {
+            if matches!(event, workspace::Event::ItemRemoved { item_id: removed } if *removed == item_id)
+                && workspace.read(cx).pane_for_item_id(item_id).is_none()
+                && let Some(sender) = sender.take()
+            {
+                sender.send(()).ok();
+            }
+        }))
+    });
+    drop(workspace);
+    if let Some(_subscription) = subscription {
+        receiver
+            .await
+            .context("miZed dropped the workspace before the tab closed")?;
+    }
+    Ok(())
 }
 
 struct DraftTab {

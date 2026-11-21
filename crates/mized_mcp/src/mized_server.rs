@@ -13,7 +13,8 @@ use context_server::{
     },
 };
 use gpui::{App, AppContext as _, Entity, Global, Task, TaskExt as _, WindowHandle};
-use serde::Serialize;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use workspace::{MultiWorkspace, Workspace};
 
@@ -22,6 +23,12 @@ struct MizedMcpServer {
 }
 
 impl Global for MizedMcpServer {}
+
+#[derive(Deserialize, JsonSchema)]
+struct WorkspaceTarget {
+    /// ID of an open miZed workspace. Defaults to the active local workspace.
+    workspace_id: Option<i64>,
+}
 
 struct McpPing;
 
@@ -61,7 +68,7 @@ pub(super) fn start_mized_server(cx: &mut App) {
             }))
         });
         server.handle_request::<McpPing>(|_, _| Task::ready(Ok(json!({}))));
-        server.add_tool(comment_tools::AddComment::default());
+        server.add_tool(comment_tools::AddComment);
         server.add_tool(comment_tools::ReadComment);
         server.add_tool(comment_tools::ListComments);
         server.add_tool(file_handoff::OpenFile);

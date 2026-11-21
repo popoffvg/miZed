@@ -250,7 +250,8 @@ fn register_editor(editor: &mut Editor, cx: &mut Context<Editor>) {
             |editor, _, event, cx| match event {
                 multi_buffer::Event::BufferRangesUpdated { .. }
                 | multi_buffer::Event::BuffersRemoved { .. }
-                | multi_buffer::Event::FileHandleChanged => show_comments(editor, cx),
+                | multi_buffer::Event::FileHandleChanged
+                | multi_buffer::Event::Edited { .. } => show_comments(editor, cx),
                 _ => {}
             },
         );
@@ -398,34 +399,31 @@ fn show_comments(editor: &mut Editor, cx: &mut Context<Editor>) {
     let mut labels = Vec::new();
     for buffer in editor.buffer().read(cx).all_buffers() {
         let buffer = buffer.read(cx);
-        let Some(file) = project::File::from_dyn(buffer.file()) else {
+        let abs_path = buffer
+            .file()
+            .and_then(|file| file.as_local())
+            .map(|file| file.abs_path(cx))
+            .or_else(|| {
+                let workspace = editor.workspace()?;
+                workspace
+                    .read(cx)
+                    .items_of_type::<CommitView>(cx)
+                    .find_map(|view| view.read(cx).working_tree_path(buffer, cx))
+            });
+        let Some(abs_path) = abs_path else {
             continue;
         };
-        let abs_path = file.abs_path(cx);
         let path = abs_path.to_string_lossy();
         let buffer = buffer.snapshot();
         let max_row = buffer.max_point().row;
+        let excerpts = snapshot
+            .excerpts_for_buffer(buffer.remote_id())
+            .collect::<Vec<_>>();
         for comment in store.comments(&path) {
             let row = comment.last_line().saturating_sub(1).min(max_row);
-            let anchor = buffer.anchor_before(Point::new(row, buffer.line_len(row)));
-            let Some(anchor) = snapshot.anchor_in_excerpt(anchor) else {
-                continue;
-            };
             let first_row = comment.line.saturating_sub(1).min(row);
-            if let Some(start) =
-                snapshot.anchor_in_buffer(buffer.anchor_before(Point::new(first_row, 0)))
-            {
-                let end = if buffer.line_len(row) == 0 && row < max_row {
-                    snapshot
-                        .anchor_in_buffer(buffer.anchor_before(Point::new(row + 1, 0)))
-                        .unwrap_or(anchor)
-                } else if buffer.line_len(row) == 0 && snapshot.as_singleton().is_some() {
-                    Anchor::Max
-                } else {
-                    anchor
-                };
-                target_ranges.push(start..end);
-            }
+            let start = buffer.anchor_before(Point::new(first_row, 0));
+            let end = buffer.anchor_before(Point::new(row, buffer.line_len(row)));
             let comment_key = (abs_path.clone(), comment.line);
             let done = comment.done;
             let label = (!addon.collapsed_comments.contains(&comment_key))
@@ -433,8 +431,6 @@ fn show_comments(editor: &mut Editor, cx: &mut Context<Editor>) {
             let height = label.as_ref().map_or(1, |label| {
                 u32::try_from(label.split('\n').count()).unwrap_or(u32::MAX)
             });
-            #[cfg(test)]
-            labels.push(label.clone());
             let editor = cx.weak_entity();
             let target = CommentTarget {
                 abs_path: comment_key.0,
@@ -442,15 +438,47 @@ fn show_comments(editor: &mut Editor, cx: &mut Context<Editor>) {
                 last_line: comment.last_line(),
                 revision: None,
             };
-            blocks.push(BlockProperties {
-                placement: BlockPlacement::Below(anchor),
-                height: Some(height),
-                style: BlockStyle::Sticky,
-                render: Arc::new(move |cx| {
-                    render_comment(label.clone(), done, &editor, anchor, &target, cx)
-                }),
-                priority: 0,
-            });
+            for excerpt in &excerpts {
+                let excerpt = &excerpt.context;
+                let start =
+                    std::cmp::max_by(start, excerpt.start, |left, right| left.cmp(right, &buffer));
+                let end =
+                    std::cmp::min_by(end, excerpt.end, |left, right| left.cmp(right, &buffer));
+                if start.cmp(&end, &buffer).is_gt() {
+                    continue;
+                }
+                let Some(visible) = snapshot.anchor_range_in_buffer(start..end) else {
+                    continue;
+                };
+                let anchor = visible.end;
+                let end = if buffer.line_len(row) == 0 && row < max_row {
+                    let next_line = buffer.anchor_before(Point::new(row + 1, 0));
+                    if next_line.cmp(&excerpt.end, &buffer).is_le() {
+                        snapshot.anchor_in_buffer(next_line).unwrap_or(anchor)
+                    } else {
+                        anchor
+                    }
+                } else if buffer.line_len(row) == 0 && snapshot.as_singleton().is_some() {
+                    Anchor::Max
+                } else {
+                    anchor
+                };
+                target_ranges.push(visible.start..end);
+                #[cfg(test)]
+                labels.push(label.clone());
+                let editor = editor.clone();
+                let target = target.clone();
+                let label = label.clone();
+                blocks.push(BlockProperties {
+                    placement: BlockPlacement::Below(anchor),
+                    height: Some(height),
+                    style: BlockStyle::Sticky,
+                    render: Arc::new(move |cx| {
+                        render_comment(label.clone(), done, &editor, anchor, &target, cx)
+                    }),
+                    priority: 0,
+                });
+            }
         }
     }
 
@@ -541,17 +569,13 @@ fn diff_comment_target(
         .read(cx)
         .buffer(rhs_id)
         .context("Cannot find the diff file")?;
-    let file = document
-        .read(cx)
-        .file()
-        .context("The diff has no file path")?;
+    let document = document.read(cx);
+    let file = document.file().context("The diff has no file path")?;
     let (path, revision) = if let Some(commit) = workspace.active_item_as::<CommitView>(cx) {
         let commit = commit.read(cx);
         let path = commit
-            .repository()
-            .read(cx)
-            .work_directory_abs_path
-            .join(file.path().as_std_path());
+            .working_tree_path(document, cx)
+            .context("The commit diff has no working tree path")?;
         let revision = if source.remote_id() == rhs_id
             && !matches!(file.disk_state(), DiskState::Historic { was_deleted: true })
         {
@@ -662,6 +686,7 @@ fn prompt_line_comment(
     };
     let (sender, receiver) = async_channel::bounded(1);
     editor.show_inline_multiline_prompt(anchor, "Comment…", &comment.text, sender, window, cx);
+    let mut original = comment.clone();
     cx.spawn(async move |_, cx| {
         let Ok(Some(text)) = receiver.recv().await else {
             return Ok(());
@@ -672,17 +697,28 @@ fn prompt_line_comment(
         }
         store
             .update(cx, |store, cx| {
+                if matches!(action, CommentAction::Add) {
+                    return store.add_comment(&path, comment, cx);
+                }
+                let Some(current) = store
+                    .comments(&path)
+                    .iter()
+                    .find(|current| current.line == comment.line)
+                else {
+                    return Task::ready(Err(anyhow::anyhow!(
+                        "The edited line comment no longer exists"
+                    )));
+                };
+                original.done = current.done;
+                if *current != original {
+                    return Task::ready(Err(anyhow::anyhow!(
+                        "The line comment changed while the editor was open"
+                    )));
+                }
+                comment.done = current.done;
                 if comment.text.is_empty() {
                     store.remove(&path, comment.line, cx)
                 } else {
-                    if matches!(action, CommentAction::Edit)
-                        && let Some(current) = store
-                            .comments(&path)
-                            .iter()
-                            .find(|current| current.line == comment.line)
-                    {
-                        comment.done = current.done;
-                    }
                     store.upsert(&path, comment, cx)
                 }
             })
