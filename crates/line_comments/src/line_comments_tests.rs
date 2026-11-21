@@ -142,6 +142,8 @@ async fn test_done_comment_retries_after_save_failure(cx: &mut TestAppContext) {
     let store = editor.read_with(&cx, |editor, _| {
         crate::editor_comment_store(editor).unwrap()
     });
+    let original = fs.load(&store_path).await.unwrap();
+    fs.pause_events();
     fs.remove_file(&store_path, Default::default())
         .await
         .unwrap();
@@ -153,11 +155,56 @@ async fn test_done_comment_retries_after_save_failure(cx: &mut TestAppContext) {
     fs.remove_dir(&store_path, Default::default())
         .await
         .unwrap();
+    fs.atomic_write(store_path.clone(), original).await.unwrap();
     save(&mut cx).await.unwrap();
     assert_eq!(
         stored_comments(&fs, &store_path).await["files"][FILE][0]["done"],
         true
     );
+    fs.unpause_events_and_flush();
+}
+
+#[gpui::test]
+async fn test_comment_save_preserves_external_changes_before_reload(cx: &mut TestAppContext) {
+    let (fs, editor, store_path, mut cx) =
+        open_file(FILE, Some(json!([{ "line": 1, "text": "review" }])), cx).await;
+    let store = editor.read_with(&cx, |editor, _| {
+        crate::editor_comment_store(editor).unwrap()
+    });
+    fs.pause_events();
+    fs.atomic_write(
+        store_path.clone(),
+        store_text(json!([
+            { "line": 1, "text": "review" },
+            { "line": 2, "text": "external" },
+        ])),
+    )
+    .await
+    .unwrap();
+    store
+        .update(&mut cx, |store, cx| {
+            store.set_comment_done(FILE, 1, true, cx)
+        })
+        .await
+        .unwrap();
+    let comments = stored_comments(&fs, &store_path).await;
+    assert_eq!(comments["files"][FILE][0]["done"], true);
+    assert_eq!(comments["files"][FILE][1]["text"], "external");
+    fs.atomic_write(
+        store_path.clone(),
+        store_text(json!([{ "line": 1, "text": "external edit", "done": true }])),
+    )
+    .await
+    .unwrap();
+    let save = store.update(&mut cx, |store, cx| {
+        store.set_comment_done(FILE, 1, false, cx)
+    });
+    assert!(save.await.is_err());
+    assert_eq!(
+        store.read_with(&cx, |store, _| store.comments(FILE)[0].text.clone()),
+        "external edit"
+    );
+    fs.unpause_events_and_flush();
 }
 
 #[gpui::test]

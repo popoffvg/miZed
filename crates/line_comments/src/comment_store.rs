@@ -19,7 +19,7 @@ pub struct CommentStore {
     files: BTreeMap<String, Vec<LineComment>>,
     loaded: bool,
     revision: u64,
-    saved_revision: u64,
+    completed_revision: u64,
     saves: async_channel::Sender<CommentSave>,
     _watch: Task<()>,
 }
@@ -27,8 +27,15 @@ pub struct CommentStore {
 struct CommentSave {
     store: Entity<CommentStore>,
     revision: u64,
-    files: BTreeMap<String, Vec<LineComment>>,
+    change: CommentChange,
     reply: oneshot::Sender<anyhow::Result<()>>,
+}
+
+struct CommentChange {
+    path: String,
+    line: u32,
+    previous: Option<LineComment>,
+    replacement: Option<LineComment>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -98,28 +105,30 @@ impl CommentStore {
             while let Ok(CommentSave {
                 store,
                 revision,
-                files,
+                change,
                 reply,
             }) = pending_saves.recv().await
             {
                 let path = save_path.clone();
                 let fs = save_fs.clone();
-                let result = cx
+                let (result, files) = cx
                     .background_spawn(async move {
-                        if recreate_folder && let Some(folder) = path.parent() {
-                            fs.create_dir(folder).await?;
+                        match write_comment_change(fs.as_ref(), &path, change, recreate_folder)
+                            .await
+                        {
+                            Ok(files) => (Ok(()), Some(files)),
+                            Err(error) => (Err(error), load_store(fs.as_ref(), &path).await.ok()),
                         }
-                        let text = serde_json::to_string_pretty(&StoreFile {
-                            version: STORE_VERSION,
-                            files,
-                        })?;
-                        fs.atomic_write(path, text).await
                     })
                     .await;
                 recreate_folder = result.is_err();
-                if result.is_ok() {
-                    store.update(cx, |store, _| store.saved_revision = revision);
-                }
+                store.update(cx, |store, cx| {
+                    store.completed_revision = revision;
+                    if let Some(files) = files {
+                        store.files = files;
+                        cx.notify();
+                    }
+                });
                 reply.send(result).ok();
             }
         })
@@ -128,7 +137,7 @@ impl CommentStore {
             files: BTreeMap::new(),
             loaded: false,
             revision: 0,
-            saved_revision: 0,
+            completed_revision: 0,
             saves,
             _watch: cx.spawn(async move |store, cx| watch_store(store, path, fs, cx).await),
         });
@@ -168,7 +177,8 @@ impl CommentStore {
                 "A comment already starts on this line"
             )));
         }
-        self.upsert(path, comment, cx)
+        let line = comment.line;
+        self.save_change(path, line, None, Some(comment), cx)
     }
 
     /// Replace the comment that starts on the same line, or add it, and save the store.
@@ -178,11 +188,13 @@ impl CommentStore {
         comment: LineComment,
         cx: &mut Context<Self>,
     ) -> Task<anyhow::Result<()>> {
-        let comments = self.files.entry(path.to_string()).or_default();
-        comments.retain(|existing| existing.line != comment.line);
-        comments.push(comment);
-        comments.sort_by_key(|comment| comment.line);
-        self.save(cx)
+        let line = comment.line;
+        let previous = self
+            .comments(path)
+            .iter()
+            .find(|existing| existing.line == line)
+            .cloned();
+        self.save_change(path, line, previous, Some(comment), cx)
     }
 
     pub(crate) fn set_comment_done(
@@ -193,17 +205,18 @@ impl CommentStore {
         cx: &mut Context<Self>,
     ) -> Task<anyhow::Result<()>> {
         let Some(comment) = self
-            .files
-            .get_mut(path)
-            .and_then(|comments| comments.iter_mut().find(|comment| comment.line == line))
+            .comments(path)
+            .iter()
+            .find(|comment| comment.line == line)
         else {
             return Task::ready(Err(anyhow::anyhow!("The line comment no longer exists")));
         };
-        if comment.done == done && self.revision == self.saved_revision {
+        if comment.done == done {
             return Task::ready(Ok(()));
         }
-        comment.done = done;
-        self.save(cx)
+        let mut replacement = comment.clone();
+        replacement.done = done;
+        self.save_change(path, line, Some(comment.clone()), Some(replacement), cx)
     }
 
     /// Remove the comment that starts on this line, and save the store.
@@ -213,17 +226,22 @@ impl CommentStore {
         line: u32,
         cx: &mut Context<Self>,
     ) -> Task<anyhow::Result<()>> {
-        if let Some(comments) = self.files.get_mut(path) {
-            comments.retain(|comment| comment.line != line);
-            if comments.is_empty() {
-                self.files.remove(path);
-            }
-        }
-        self.save(cx)
+        let previous = self
+            .comments(path)
+            .iter()
+            .find(|comment| comment.line == line)
+            .cloned();
+        self.save_change(path, line, previous, None, cx)
     }
 
-    fn save(&mut self, cx: &mut Context<Self>) -> Task<anyhow::Result<()>> {
-        cx.notify();
+    fn save_change(
+        &mut self,
+        path: &str,
+        line: u32,
+        previous: Option<LineComment>,
+        replacement: Option<LineComment>,
+        cx: &mut Context<Self>,
+    ) -> Task<anyhow::Result<()>> {
         self.revision += 1;
         let (reply, result) = oneshot::channel();
         if self
@@ -231,7 +249,12 @@ impl CommentStore {
             .try_send(CommentSave {
                 store: cx.entity(),
                 revision: self.revision,
-                files: self.files.clone(),
+                change: CommentChange {
+                    path: path.to_string(),
+                    line,
+                    previous,
+                    replacement,
+                },
                 reply,
             })
             .is_err()
@@ -248,6 +271,39 @@ impl CommentStore {
     }
 }
 
+async fn write_comment_change(
+    fs: &dyn Fs,
+    path: &Path,
+    change: CommentChange,
+    recreate_folder: bool,
+) -> anyhow::Result<BTreeMap<String, Vec<LineComment>>> {
+    if recreate_folder && let Some(folder) = path.parent() {
+        fs.create_dir(folder).await?;
+    }
+    let mut files = load_store(fs, path).await?;
+    let comments = files.entry(change.path.clone()).or_default();
+    let current = comments.iter().find(|comment| comment.line == change.line);
+    anyhow::ensure!(
+        current == change.previous.as_ref(),
+        "The line comment on disk changed before it could be saved"
+    );
+    comments.retain(|comment| comment.line != change.line);
+    if let Some(replacement) = change.replacement {
+        comments.push(replacement);
+        comments.sort_by_key(|comment| comment.line);
+    }
+    if comments.is_empty() {
+        files.remove(&change.path);
+    }
+    let store_file = StoreFile {
+        version: STORE_VERSION,
+        files,
+    };
+    let text = serde_json::to_string_pretty(&store_file)?;
+    fs.atomic_write(path.to_path_buf(), text).await?;
+    Ok(store_file.files)
+}
+
 async fn watch_store(
     store: WeakEntity<CommentStore>,
     path: PathBuf,
@@ -261,7 +317,7 @@ async fn watch_store(
     let (mut events, _watcher) = fs.watch(folder, STORE_WATCH_LATENCY).await;
     loop {
         let Ok(revision) = store.read_with(cx, |store, _| {
-            (store.revision == store.saved_revision).then_some(store.revision)
+            (store.revision == store.completed_revision).then_some(store.revision)
         }) else {
             return;
         };

@@ -1709,8 +1709,9 @@ impl MultiWorkspace {
                 .update_in(cx, |this, window, cx| {
                     let session_id = workspace.read(cx).session_id();
                     let window_id = window.window_handle().window_id().as_u64();
-                    workspace.update(cx, |workspace, _cx| {
+                    workspace.update(cx, |workspace, cx| {
                         workspace.set_database_id(workspace_id);
+                        cx.notify();
                     });
                     this.serialize(cx);
                     let db = db.clone();

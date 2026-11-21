@@ -30,15 +30,29 @@ struct CommentStoreTarget {
     store: Option<String>,
 }
 
+#[derive(Deserialize, JsonSchema)]
+struct CommentLocation {
+    /// Absolute file path shown in the editor or diff.
+    path: String,
+    /// The first line of the comment in the working tree, starting at 1.
+    line: u32,
+}
+
+impl CommentLocation {
+    fn validate(&self) -> Result<()> {
+        check_comment_path(&self.path)?;
+        ensure!(self.line > 0, "The first comment line must be at least 1");
+        Ok(())
+    }
+}
+
 /// Add an agent line comment to a named miZed workspace store.
 #[derive(Deserialize, JsonSchema)]
 pub(super) struct AddCommentInput {
     #[serde(flatten)]
     store: CommentStoreTarget,
-    /// Absolute file path. Use the file path shown in the editor or diff.
-    path: String,
-    /// First line in the working tree, starting at 1.
-    line: u32,
+    #[serde(flatten)]
+    location: CommentLocation,
     /// Inclusive last line, starting at 1.
     end_line: Option<u32>,
     text: String,
@@ -49,10 +63,8 @@ pub(super) struct AddCommentInput {
 pub(super) struct ReadCommentInput {
     #[serde(flatten)]
     store: CommentStoreTarget,
-    /// Absolute file path.
-    path: String,
-    /// The first line of the comment, starting at 1.
-    line: u32,
+    #[serde(flatten)]
+    location: CommentLocation,
 }
 
 /// List line comments in a named miZed workspace store.
@@ -89,17 +101,17 @@ impl McpServerTool for AddComment {
         input: Self::Input,
         cx: &mut AsyncApp,
     ) -> Result<ToolResponse<Self::Output>> {
-        check_comment_path(&input.path)?;
-        ensure!(input.line > 0, "The first comment line must be at least 1");
+        input.location.validate()?;
+        let CommentLocation { path, line } = input.location;
         ensure!(
-            input.end_line.is_none_or(|end| end >= input.line),
+            input.end_line.is_none_or(|end| end >= line),
             "The last comment line must follow the first"
         );
         let text = input.text.trim().to_owned();
         ensure!(!text.is_empty(), "Enter text for the line comment");
         let comment = LineComment {
-            line: input.line,
-            end_line: input.end_line.filter(|end| *end > input.line),
+            line,
+            end_line: input.end_line.filter(|end| *end > line),
             text,
             done: false,
             orphaned: false,
@@ -109,11 +121,11 @@ impl McpServerTool for AddComment {
         let store = open_comment_store(input.store, cx).await?;
         let save = cx.update(|cx| {
             store.update(cx, |store, cx| {
-                store.add_comment(&input.path, comment.clone(), cx)
+                store.add_comment(&path, comment.clone(), cx)
             })
         });
         save.await?;
-        mcp_response(comment_result(&input.path, Some(&comment))?)
+        mcp_response(comment_result(&path, Some(&comment))?)
     }
 }
 
@@ -131,16 +143,16 @@ impl McpServerTool for ReadComment {
         input: Self::Input,
         cx: &mut AsyncApp,
     ) -> Result<ToolResponse<Self::Output>> {
-        check_comment_path(&input.path)?;
-        ensure!(input.line > 0, "The first comment line must be at least 1");
+        input.location.validate()?;
+        let CommentLocation { path, line } = input.location;
         let store = open_comment_store(input.store, cx).await?;
         let result = cx.update(|cx| {
             let comment = store
                 .read(cx)
-                .comments(&input.path)
+                .comments(&path)
                 .iter()
-                .find(|comment| comment.line == input.line);
-            comment_result(&input.path, comment)
+                .find(|comment| comment.line == line);
+            comment_result(&path, comment)
         })?;
         mcp_response(result)
     }

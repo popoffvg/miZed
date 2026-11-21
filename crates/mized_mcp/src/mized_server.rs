@@ -6,10 +6,10 @@ use std::{io::Write as _, path::Path};
 use anyhow::{Context as _, Result, ensure};
 use context_server::{
     listener::{McpServer, ToolResponse},
+    protocol::supports_protocol_version,
     types::{
         Implementation, InitializeResponse, LATEST_PROTOCOL_VERSION, ProtocolVersion, Request,
-        ServerCapabilities, ToolResponseContent, ToolsCapabilities, VERSION_2024_11_05,
-        VERSION_2025_03_26, VERSION_2025_06_18, requests::Initialize,
+        ServerCapabilities, ToolResponseContent, ToolsCapabilities, requests::Initialize,
     },
 };
 use gpui::{App, AppContext as _, Entity, Global, Task, TaskExt as _, WindowHandle};
@@ -45,12 +45,10 @@ pub(super) fn start_mized_server(cx: &mut App) {
     cx.spawn(async move |cx| {
         let mut server = McpServer::new(cx).await?;
         server.handle_request::<Initialize>(|request, _| {
-            let protocol_version = match request.protocol_version.0.as_str() {
-                VERSION_2024_11_05
-                | VERSION_2025_03_26
-                | VERSION_2025_06_18
-                | LATEST_PROTOCOL_VERSION => request.protocol_version,
-                _ => ProtocolVersion(LATEST_PROTOCOL_VERSION.to_owned()),
+            let protocol_version = if supports_protocol_version(&request.protocol_version) {
+                request.protocol_version
+            } else {
+                ProtocolVersion(LATEST_PROTOCOL_VERSION.to_owned())
             };
             Task::ready(Ok(InitializeResponse {
                 protocol_version,

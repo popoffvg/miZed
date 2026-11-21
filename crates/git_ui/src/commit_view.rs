@@ -215,12 +215,21 @@ impl CommitView {
         &self.commit.sha
     }
 
-    pub fn repository(&self) -> &Entity<Repository> {
+    pub(crate) fn repository(&self) -> &Entity<Repository> {
         &self.repository
     }
 
     pub fn working_tree_path(&self, buffer: &Buffer, cx: &App) -> Option<PathBuf> {
-        self.multibuffer.read(cx).buffer(buffer.remote_id())?;
+        let buffer_id = buffer.remote_id();
+        self.multibuffer.read(cx).buffer(buffer_id).or_else(|| {
+            self.editor
+                .read(cx)
+                .lhs_editor()?
+                .read(cx)
+                .buffer()
+                .read(cx)
+                .buffer(buffer_id)
+        })?;
         let file = buffer.file()?;
         Some(
             self.repository

@@ -25,15 +25,6 @@ impl ModelContextProtocol {
         Self { inner }
     }
 
-    fn supported_protocols() -> Vec<types::ProtocolVersion> {
-        vec![
-            types::ProtocolVersion(types::LATEST_PROTOCOL_VERSION.to_string()),
-            types::ProtocolVersion(types::VERSION_2025_06_18.to_string()),
-            types::ProtocolVersion(types::VERSION_2025_03_26.to_string()),
-            types::ProtocolVersion(types::VERSION_2024_11_05.to_string()),
-        ]
-    }
-
     pub async fn initialize(
         self,
         client_info: types::Implementation,
@@ -81,10 +72,20 @@ pub fn initialize_parameters(client_info: types::Implementation) -> types::Initi
 
 pub fn check_protocol_version(version: &types::ProtocolVersion) -> Result<()> {
     anyhow::ensure!(
-        ModelContextProtocol::supported_protocols().contains(version),
+        supports_protocol_version(version),
         "Unsupported protocol version: {version:?}",
     );
     Ok(())
+}
+
+pub fn supports_protocol_version(version: &types::ProtocolVersion) -> bool {
+    matches!(
+        version.0.as_str(),
+        types::LATEST_PROTOCOL_VERSION
+            | types::VERSION_2025_06_18
+            | types::VERSION_2025_03_26
+            | types::VERSION_2024_11_05
+    )
 }
 
 pub struct InitializedContextServerProtocol {

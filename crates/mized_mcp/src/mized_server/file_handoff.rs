@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet, hash_map::Entry},
+    collections::{HashMap, HashSet},
     path::PathBuf,
 };
 
@@ -156,6 +156,7 @@ impl McpServerTool for OpenMultibuffer {
             );
         }
         let mut paths = HashSet::new();
+        let mut buffers = HashMap::new();
         {
             let paths = input
                 .excerpts
@@ -165,6 +166,8 @@ impl McpServerTool for OpenMultibuffer {
             let checks = stream::iter(paths)
                 .map(|path| {
                     let fs = &fs;
+                    let project = &project;
+                    let mut cx = cx.clone();
                     async move {
                         ensure!(
                             fs.metadata(path)
@@ -173,33 +176,31 @@ impl McpServerTool for OpenMultibuffer {
                             "The miZed excerpt file does not exist: {}",
                             path.display()
                         );
-                        anyhow::Ok(())
+                        let buffer = project
+                            .update(&mut cx, |project, cx| project.open_local_buffer(path, cx))
+                            .await?;
+                        anyhow::Ok((path.clone(), buffer))
                     }
                 })
                 .buffered(8);
             futures::pin_mut!(checks);
             while let Some(result) = checks.next().await {
-                result?;
+                let (path, buffer) = result?;
+                buffers.insert(path, buffer);
             }
         }
         let mut excerpts = HashMap::new();
-        let mut buffers = HashMap::new();
         for (index, excerpt) in input.excerpts.into_iter().enumerate() {
-            let buffer = match buffers.entry(excerpt.path) {
-                Entry::Occupied(entry) => entry.into_mut(),
-                Entry::Vacant(entry) => {
-                    let task = project
-                        .update(cx, |project, cx| project.open_local_buffer(entry.key(), cx));
-                    entry.insert(task.await?)
-                }
-            };
+            let buffer = buffers
+                .get(&excerpt.path)
+                .context("The miZed excerpt file did not open")?;
             let range = buffer.read_with(cx, |buffer, _| {
                 let start = excerpt.start_line - 1;
                 let end = excerpt.end_line - 1;
                 ensure!(
                     end <= buffer.max_point().row,
-                    "The miZed excerpt {} ends past the file",
-                    index + 1,
+                    "The miZed excerpt ends past the file: {}",
+                    excerpt.path.display(),
                 );
                 Ok::<_, anyhow::Error>(Point::new(start, 0)..Point::new(end, buffer.line_len(end)))
             })?;

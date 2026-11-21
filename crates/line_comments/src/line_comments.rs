@@ -18,7 +18,7 @@ use gpui::{
     AnyElement, App, Context, Entity, EntityId, Global, Subscription, Task, WeakEntity, Window,
     actions,
 };
-use language::{DiskState, LocalFile as _, Point};
+use language::{DiskState, LocalFile as _, Point, ToPoint as _};
 use ui::{ContextMenu, Tooltip, prelude::*, right_click_menu};
 use workspace::{
     Workspace,
@@ -129,6 +129,7 @@ struct LineCommentAddon {
     editor: WeakEntity<Editor>,
     store: Option<(Entity<CommentStore>, Subscription)>,
     selection_subscription: Option<Subscription>,
+    workspace_subscription: Option<Subscription>,
     block_ids: Vec<CustomBlockId>,
     collapsed_comments: HashSet<(PathBuf, u32)>,
     _subscriptions: [Subscription; 4],
@@ -282,6 +283,7 @@ fn register_editor(editor: &mut Editor, cx: &mut Context<Editor>) {
         editor: cx.weak_entity(),
         store: None,
         selection_subscription: None,
+        workspace_subscription: None,
         block_ids: Vec::new(),
         collapsed_comments: HashSet::default(),
         _subscriptions: [
@@ -306,14 +308,20 @@ fn connect_store(editor: &mut Editor, cx: &mut Context<Editor>) {
     else {
         return;
     };
-    let Some(workspace_id) = stores
-        .workspace
-        .upgrade()
-        .and_then(|workspace| workspace.read(cx).database_id())
-    else {
+    let Some(workspace) = stores.workspace.upgrade() else {
         return;
     };
     let selection = stores.selection.clone();
+    let Some(workspace_id) = workspace.read(cx).database_id() else {
+        if let Some(addon) = editor.addon_mut::<LineCommentAddon>()
+            && addon.workspace_subscription.is_none()
+        {
+            addon.workspace_subscription = Some(cx.observe(&workspace, |editor, _, cx| {
+                connect_store(editor, cx);
+            }));
+        }
+        return;
+    };
     let store = workspace_comment_store(workspace_id, &selection, &project, cx);
     let subscription = cx.observe(&store, |editor, _, cx| show_comments(editor, cx));
     let Some(addon) = editor.addon_mut::<LineCommentAddon>() else {
@@ -327,6 +335,7 @@ fn connect_store(editor: &mut Editor, cx: &mut Context<Editor>) {
         addon.collapsed_comments.clear();
     }
     addon.store = Some((store, subscription));
+    addon.workspace_subscription = None;
     if addon.selection_subscription.is_none() {
         addon.selection_subscription = Some(cx.observe(&selection, |editor, _, cx| {
             connect_store(editor, cx);
@@ -444,7 +453,13 @@ fn show_comments(editor: &mut Editor, cx: &mut Context<Editor>) {
                     std::cmp::max_by(start, excerpt.start, |left, right| left.cmp(right, &buffer));
                 let end =
                     std::cmp::min_by(end, excerpt.end, |left, right| left.cmp(right, &buffer));
-                if start.cmp(&end, &buffer).is_gt() {
+                let start_point = start.to_point(&buffer);
+                let end_point = end.to_point(&buffer);
+                if start_point > end_point
+                    || start_point == end_point
+                        && start_point == excerpt.end.to_point(&buffer)
+                        && snapshot.as_singleton().is_none()
+                {
                     continue;
                 }
                 let Some(visible) = snapshot.anchor_range_in_buffer(start..end) else {
@@ -691,7 +706,8 @@ fn prompt_line_comment(
         let Ok(Some(text)) = receiver.recv().await else {
             return Ok(());
         };
-        comment.text = with_revision(text.trim(), target.revision.as_deref());
+        let revision = comment_revision(&original.text).or(target.revision.as_deref());
+        comment.text = with_revision(text.trim(), revision);
         if comment.text.is_empty() && matches!(action, CommentAction::Add) {
             return Ok(());
         }
@@ -728,15 +744,24 @@ fn prompt_line_comment(
 
 /// A comment written on a past commit names that commit at the end, because the store
 /// keeps the line as a line of the working tree.
+const COMMENT_REVISION_PREFIX: &str = "\n\nread on ";
+
+fn comment_revision(text: &str) -> Option<&str> {
+    let (_, revision) = text.rsplit_once(COMMENT_REVISION_PREFIX)?;
+    let hash = revision.strip_suffix('^').unwrap_or(revision);
+    (matches!(hash.len(), 40 | 64) && hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then_some(revision)
+}
+
 fn with_revision(text: &str, revision: Option<&str>) -> String {
     let Some(revision) = revision else {
         return text.to_string();
     };
-    let read_on = format!("read on {revision}");
+    let read_on = format!("{COMMENT_REVISION_PREFIX}{revision}");
     if text.is_empty() || text.ends_with(&read_on) {
         text.to_string()
     } else {
-        format!("{text}\n\n{read_on}")
+        format!("{text}{read_on}")
     }
 }
 
