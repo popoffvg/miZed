@@ -945,16 +945,8 @@ impl TerminalElement {
         hitbox: &Hitbox,
         content_mode: &ContentMode,
         mouse_input_mode: MouseInputMode,
-        local_selection: bool,
         window: &mut Window,
     ) {
-        let input_mode = move |button| {
-            if local_selection && button == Some(MouseButton::Left) {
-                MouseInputMode::LocalSelection
-            } else {
-                mouse_input_mode
-            }
-        };
         let focus = self.focus.clone();
         let terminal = self.terminal.clone();
         let terminal_view = self.terminal_view.clone();
@@ -974,7 +966,7 @@ impl TerminalElement {
                     if scroll_top > Pixels::ZERO {
                         adjusted_event.position.y += scroll_top;
                     }
-                    terminal.mouse_down(&adjusted_event, input_mode(Some(MouseButton::Left)), cx);
+                    terminal.mouse_down(&adjusted_event, mouse_input_mode, cx);
                     cx.notify();
                 })
             }
@@ -1003,7 +995,7 @@ impl TerminalElement {
                             terminal.mouse_drag(
                                 &adjusted_event,
                                 hitbox.bounds,
-                                input_mode(e.pressed_button),
+                                mouse_input_mode,
                                 cx,
                             );
                             cx.notify();
@@ -1013,14 +1005,13 @@ impl TerminalElement {
 
                 if hitbox.is_hovered(window) {
                     terminal.update(cx, |terminal, cx| {
-                        terminal.mouse_move(e, input_mode(e.pressed_button), cx);
+                        terminal.mouse_move(e, mouse_input_mode, cx);
                     })
                 }
             }
         });
 
         for button in [MouseButton::Left, MouseButton::Middle, MouseButton::Right] {
-            let mouse_input_mode = input_mode(Some(button));
             self.interactivity.on_mouse_up(button, {
                 let terminal = terminal.clone();
                 let focus = focus.clone();
@@ -1618,7 +1609,6 @@ impl Element for TerminalElement {
                 &layout.hitbox,
                 &layout.content_mode,
                 mouse_input_mode,
-                terminal_view.local_selection,
                 window,
             );
             if window.modifiers().secondary(cx)

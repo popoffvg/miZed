@@ -39,7 +39,7 @@ With this setting, each terminal thread of the Agent Panel runs in a terminal of
 - A new terminal thread opens a tab in the Herdr space of the project folder. If the folder has no space, miZed creates one.
 - Close a row to remove it from the sidebar. The Herdr terminal continues to run.
 - The terminal title comes from Herdr, and the sidebar reads it every three seconds.
-- Drag with the left mouse button to select text in the terminal.
+- Hold Shift and drag to select text when a terminal app uses the mouse.
 
 Herdr terminals are local. A remote project uses the usual Zed terminals.
 

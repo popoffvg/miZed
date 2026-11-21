@@ -148,7 +148,6 @@ pub struct TerminalView {
     background_corner_radii: Option<Corners<Rems>>,
     content_top_padding: Rems,
     read_only: bool,
-    local_selection: bool,
     // Explicit override for whether workspace-specific context menu actions are shown.
     // When `None`, visibility is derived from `mode` (hidden for embedded terminals).
     show_workspace_actions: Option<bool>,
@@ -304,7 +303,6 @@ impl TerminalView {
             background_corner_radii: None,
             content_top_padding: Rems::ZERO,
             read_only: false,
-            local_selection: false,
             show_workspace_actions: None,
             workspace_id,
             show_breadcrumbs: TerminalSettings::get_global(cx).toolbar.breadcrumbs,
@@ -381,11 +379,6 @@ impl TerminalView {
         } else {
             MouseInputMode::ReportToTerminal
         }
-    }
-
-    pub fn with_local_selection(mut self, enabled: bool) -> Self {
-        self.local_selection = enabled;
-        self
     }
 
     /// Explicitly override whether workspace-specific context menu actions (e.g. creating or
@@ -2671,7 +2664,7 @@ mod tests {
             window.blur(cx);
         });
         cx.run_until_parked();
-        assert_drag_copies_hello(&terminal, &mut cx);
+        assert_drag_copies_hello(&terminal, gpui::Modifiers::default(), &mut cx);
         cx.update(|window, cx| window.blur(cx));
         cx.run_until_parked();
         assert!(
@@ -2682,35 +2675,49 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn local_selection_copies_from_mouse_reporting_terminal(cx: &mut TestAppContext) {
+    async fn mouse_reporting_delivers_click_and_shift_allows_selection(cx: &mut TestAppContext) {
         let (project, _, window_handle) = init_test_with_window(cx).await;
-        let (_, terminal, view) =
-            add_display_only_terminal(&project, window_handle, true, false, cx);
+        let (_, terminal, _) = add_display_only_terminal(&project, window_handle, true, false, cx);
         let mut cx = VisualTestContext::from_window(window_handle.into(), cx);
         cx.update(|window, cx| {
-            view.update(cx, |view, cx| {
-                view.local_selection = true;
-                cx.notify();
-            });
             terminal.update(cx, |terminal, cx| {
-                terminal.write_output(b"\x1b[?1003h\x1b[?1006hhello world\n", cx);
+                terminal.write_output(b"\x1b[?1000h\x1b[?1006hhello world\n", cx);
                 terminal.sync(window, cx);
+                terminal.take_pty_write_log();
             });
         });
         cx.run_until_parked();
-        assert_drag_copies_hello(&terminal, &mut cx);
+        let bounds = terminal.read_with(&cx, |terminal, _| terminal.last_content.terminal_bounds);
+        let first_cell =
+            bounds.bounds.origin + gpui::point(bounds.cell_width * 0.1, bounds.line_height * 0.5);
+        cx.simulate_mouse_down(first_cell, MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_up(first_cell, MouseButton::Left, gpui::Modifiers::default());
+        assert_eq!(
+            terminal.update(&mut cx, |terminal, _| terminal.take_pty_write_log()),
+            [b"\x1b[<0;1;1M".to_vec(), b"\x1b[<0;1;1m".to_vec()]
+        );
+        assert_drag_copies_hello(&terminal, gpui::Modifiers::shift(), &mut cx);
+        assert!(
+            terminal
+                .update(&mut cx, |terminal, _| terminal.take_pty_write_log())
+                .is_empty()
+        );
     }
 
-    fn assert_drag_copies_hello(terminal: &Entity<Terminal>, cx: &mut VisualTestContext) {
+    fn assert_drag_copies_hello(
+        terminal: &Entity<Terminal>,
+        modifiers: gpui::Modifiers,
+        cx: &mut VisualTestContext,
+    ) {
         let bounds = terminal.read_with(cx, |terminal, _| terminal.last_content.terminal_bounds);
         let start =
             bounds.bounds.origin + gpui::point(bounds.cell_width * 0.1, bounds.line_height * 0.5);
         let end =
             bounds.bounds.origin + gpui::point(bounds.cell_width * 5.1, bounds.line_height * 0.5);
-        cx.simulate_mouse_move(start, None, gpui::Modifiers::default());
-        cx.simulate_mouse_down(start, MouseButton::Left, gpui::Modifiers::default());
-        cx.simulate_mouse_move(end, Some(MouseButton::Left), gpui::Modifiers::default());
-        cx.simulate_mouse_up(end, MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_move(start, None, modifiers);
+        cx.simulate_mouse_down(start, MouseButton::Left, modifiers);
+        cx.simulate_mouse_move(end, Some(MouseButton::Left), modifiers);
+        cx.simulate_mouse_up(end, MouseButton::Left, modifiers);
         cx.update(|window, cx| window.dispatch_action(Box::new(Copy), cx));
         cx.run_until_parked();
         assert_eq!(

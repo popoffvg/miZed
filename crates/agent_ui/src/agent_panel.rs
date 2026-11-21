@@ -2102,7 +2102,6 @@ impl AgentPanel {
         } else {
             None
         };
-        let local_selection = herdr_session.is_some();
         let terminal_task = herdr_session
             .is_none()
             .then(|| self.create_terminal_shell(working_directory, cx));
@@ -2160,8 +2159,7 @@ impl AgentPanel {
                 let terminal_for_init_command = terminal.clone();
                 let terminal_view = cx.new(|cx| {
                     let mut view =
-                        TerminalView::new(terminal, workspace, workspace_id, project, window, cx)
-                            .with_local_selection(local_selection);
+                        TerminalView::new(terminal, workspace, workspace_id, project, window, cx);
                     view.set_show_workspace_actions(false, cx);
                     view
                 });
