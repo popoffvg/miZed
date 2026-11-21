@@ -31,6 +31,8 @@ actions!(
         ScrollToBottom,
         /// Opens a following markdown preview that syncs with the editor.
         OpenFollowingPreview,
+        /// Switches the current Markdown tab between the source editor and preview.
+        TogglePreviewInPlace,
         /// Closes the markdown preview and returns focus to the source editor.
         CloseAndReturnToEditor
     ]

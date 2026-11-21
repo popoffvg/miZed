@@ -209,6 +209,18 @@ impl CommentStore {
         done: bool,
         cx: &mut Context<Self>,
     ) -> Task<anyhow::Result<()>> {
+        let save = self.edit_comment(path, line, None, Some(done), cx);
+        cx.spawn(async move |_, _| save.await.map(drop))
+    }
+
+    pub fn edit_comment(
+        &mut self,
+        path: &str,
+        line: u32,
+        text: Option<String>,
+        done: Option<bool>,
+        cx: &mut Context<Self>,
+    ) -> Task<anyhow::Result<LineComment>> {
         let Some(comment) = self
             .comments(path)
             .iter()
@@ -216,12 +228,27 @@ impl CommentStore {
         else {
             return Task::ready(Err(anyhow::anyhow!("The line comment no longer exists")));
         };
-        if comment.done == done {
-            return Task::ready(Ok(()));
-        }
         let mut replacement = comment.clone();
-        replacement.done = done;
-        self.save_change(path, line, Some(comment.clone()), Some(replacement), cx)
+        if let Some(text) = text {
+            replacement.text = text;
+        }
+        if let Some(done) = done {
+            replacement.done = done;
+        }
+        if replacement == *comment && self.revision == self.completed_revision {
+            return Task::ready(Ok(replacement));
+        }
+        let save = self.save_change(
+            path,
+            line,
+            Some(comment.clone()),
+            Some(replacement.clone()),
+            cx,
+        );
+        cx.spawn(async move |_, _| {
+            save.await?;
+            Ok(replacement)
+        })
     }
 
     /// Remove the comment that starts on this line, and save the store.

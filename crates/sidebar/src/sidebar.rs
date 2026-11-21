@@ -17,8 +17,8 @@ use agent_ui::threads_archive_view::{
 };
 use agent_ui::{
     AcpThreadImportOnboarding, Agent, AgentPanel, AgentPanelEvent, AgentThreadSource,
-    ArchiveSelectedThread, CrossChannelImportOnboarding, DEFAULT_THREAD_TITLE, NewTerminalThread,
-    NewThread, RenameSelectedThread, TerminalId, ThreadId, ThreadImportModal,
+    ArchiveSelectedThread, CrossChannelImportOnboarding, DEFAULT_THREAD_TITLE, HerdrThreadStatus,
+    NewTerminalThread, NewThread, RenameSelectedThread, TerminalId, ThreadId, ThreadImportModal,
     ThreadTitleRegenerationResult, channels_with_threads, import_threads_from_other_channels,
 };
 use agent_ui::{MessageEditorEvent, StateChange, thread_worktree_archive};
@@ -6633,14 +6633,44 @@ impl Sidebar {
                 None => (None, display_title, terminal.highlight_positions.clone()),
             };
 
+        let status = TerminalThreadMetadataStore::global(cx)
+            .read(cx)
+            .herdr_thread_status(terminal.metadata.terminal_id);
+        let (icon, icon_color, row_status) = match status {
+            Some(HerdrThreadStatus::Done) => (
+                IconName::Check,
+                Color::Success,
+                AgentThreadStatus::Completed,
+            ),
+            Some(HerdrThreadStatus::NeedsAttention) => (
+                IconName::Warning,
+                Color::Warning,
+                AgentThreadStatus::Completed,
+            ),
+            Some(HerdrThreadStatus::Idle) => {
+                (IconName::Circle, Color::Muted, AgentThreadStatus::Completed)
+            }
+            Some(HerdrThreadStatus::Working) => {
+                (IconName::Terminal, Color::Muted, AgentThreadStatus::Running)
+            }
+            None => (
+                IconName::Terminal,
+                Color::Muted,
+                AgentThreadStatus::Completed,
+            ),
+        };
         let terminal_item = ThreadItem::new(id, title)
             .base_bg(sidebar_bg)
-            .icon(IconName::Terminal)
-            .when_some(icon_char, |this, icon_char| this.icon_char(icon_char))
+            .icon(icon)
+            .icon_color(icon_color)
+            .status(row_status)
+            .when_some(icon_char.filter(|_| status.is_none()), |this, icon_char| {
+                this.icon_char(icon_char)
+            })
             .is_remote(is_remote)
             .worktrees(worktrees)
             .timestamp(timestamp)
-            .notified(terminal.has_notification)
+            .notified(terminal.has_notification && status.is_none())
             .highlight_positions(highlight_positions)
             .selected(is_active)
             .focused(is_focused)

@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use crate::herdr_sessions::{self, HerdrSession};
+use crate::herdr_sessions::{self, HerdrSession, HerdrThreadStatus};
 use agent_settings::AgentSettings;
 use anyhow::Context as _;
 use chrono::{DateTime, Utc};
@@ -494,6 +494,10 @@ impl TerminalThreadMetadataStore {
             .map(|session| session.name.as_str())
     }
 
+    pub fn herdr_thread_status(&self, id: TerminalId) -> Option<HerdrThreadStatus> {
+        self.herdr_sessions.as_ref()?.get(&id)?.status
+    }
+
     fn configure_herdr(&mut self, cx: &mut Context<Self>) {
         let enabled = AgentSettings::try_get(cx)
             .is_some_and(|settings| settings.threads_sidebar.herdr_sessions);
@@ -844,6 +848,7 @@ mod tests {
                     id,
                     HerdrSession {
                         name: "build".into(),
+                        status: None,
                         metadata: session,
                     },
                 );

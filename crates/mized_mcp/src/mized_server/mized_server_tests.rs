@@ -10,7 +10,7 @@ use workspace::{MultiWorkspace, pane::CloseActiveItem};
 use zed_actions::assistant::FocusAgent;
 
 use super::{
-    comment_tools::{AddComment, ClearComments, ListComments},
+    comment_tools::{AddComment, ClearComments, EditComment, ListComments, ReadComment},
     file_handoff::OpenMultibuffer,
     workspace_switch::{
         ListBranches, ListRepositories, ListWorkspaces, SwitchBranch, SwitchRepository,
@@ -31,6 +31,43 @@ async fn call<T: McpServerTool>(tool: T, input: Value, cx: &mut gpui::AsyncApp) 
     let input = serde_json::from_value(input).unwrap();
     let response = tool.run(input, cx).await.unwrap();
     serde_json::to_value(response.structured_content).unwrap()
+}
+
+#[gpui::test]
+async fn test_mcp_edits_comment_text_and_done_state(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/project", json!({ "file.txt": "first\nsecond\n" }))
+        .await;
+    let project = Project::test(fs, [Path::new("/project")], cx).await;
+    let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
+    window
+        .update(cx, |root, _, cx| root.set_random_database_id(cx))
+        .unwrap();
+    let mut async_cx = cx.to_async();
+    let location = json!({ "path": "/project/file.txt", "line": 1, "store": "review" });
+    let mut input = location.clone();
+    input["text"] = json!("Original");
+    input["end_line"] = json!(2);
+    let mut expected = call(AddComment, input, &mut async_cx).await;
+
+    let mut input = location.clone();
+    input["text"] = json!("Revised");
+    input["done"] = json!(true);
+    expected["comment"]["text"] = json!("Revised");
+    expected["comment"]["done"] = json!(true);
+    assert_eq!(call(EditComment, input, &mut async_cx).await, expected);
+
+    let mut input = location.clone();
+    input["text"] = json!("Final text");
+    expected["comment"]["text"] = json!("Final text");
+    assert_eq!(call(EditComment, input, &mut async_cx).await, expected);
+
+    let mut input = location.clone();
+    input["done"] = json!(false);
+    expected["comment"].as_object_mut().unwrap().remove("done");
+    assert_eq!(call(EditComment, input, &mut async_cx).await, expected);
+    assert_eq!(call(ReadComment, location, &mut async_cx).await, expected);
 }
 
 #[gpui::test]

@@ -71,6 +71,8 @@ use util::{
 };
 use workspace::Workspace;
 
+pub use crate::herdr_sessions::HerdrThreadStatus;
+
 use crate::agent_configuration::ManageProfilesModal;
 pub use crate::agent_connection_store::{ActiveAcpConnection, AgentConnectionStore};
 pub use crate::agent_panel::{

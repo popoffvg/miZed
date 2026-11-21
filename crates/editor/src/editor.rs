@@ -9111,13 +9111,11 @@ impl Editor {
                                     div().flex_shrink_0().child(
                                         Button::new("submit-inline-input", "Submit")
                                             .label_size(LabelSize::Small)
-                                            .when(!multiline, |button| {
-                                                button.end_icon(
-                                                    Icon::new(IconName::Return)
-                                                        .size(IconSize::XSmall)
-                                                        .color(Color::Muted),
-                                                )
-                                            })
+                                            .end_icon(
+                                                Icon::new(IconName::Return)
+                                                    .size(IconSize::XSmall)
+                                                    .color(Color::Muted),
+                                            )
                                             .on_click(move |_, window, cx| {
                                                 finish(true, window, cx)
                                             }),

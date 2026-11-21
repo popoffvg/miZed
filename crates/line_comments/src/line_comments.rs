@@ -32,11 +32,13 @@ pub use line_comment_panel::add_line_comments_panel;
 actions!(
     line_comments,
     [
-        /// Adds a comment to the selected lines.
-        AddLineComment,
-        /// Opens the comment on the current line for editing. Empty text deletes it.
-        #[action(deprecated_aliases = ["git::EditLineComment"])]
-        EditLineComment,
+        /// Opens the comment on the first selected line or starts one for the selected lines.
+        #[action(deprecated_aliases = [
+            "line_comments::AddLineComment",
+            "line_comments::EditLineComment",
+            "git::EditLineComment",
+        ])]
+        OpenLineComment,
         /// Searches comments in the active workspace store.
         ListLineComments,
         /// Selects the workspace store used to show and edit line comments.
@@ -46,11 +48,8 @@ actions!(
 
 pub fn init(cx: &mut App) {
     cx.observe_new(|workspace: &mut Workspace, _, cx| {
-        workspace.register_action(|workspace, _: &AddLineComment, window, cx| {
-            prompt_diff_comment(workspace, CommentAction::Add, window, cx)
-        });
-        workspace.register_action(|workspace, _: &EditLineComment, window, cx| {
-            prompt_diff_comment(workspace, CommentAction::Edit, window, cx)
+        workspace.register_action(|workspace, _: &OpenLineComment, window, cx| {
+            prompt_diff_comment(workspace, window, cx)
         });
         workspace.register_action(line_comment_picker::list_line_comments);
         workspace.register_action(line_comment_panel::toggle_line_comments_panel);
@@ -105,12 +104,6 @@ struct CommentTarget {
     revision: Option<String>,
 }
 
-#[derive(Clone, Copy)]
-enum CommentAction {
-    Add,
-    Edit,
-}
-
 /// The 1-based first and last line that a selection covers. A selection that ends at the
 /// start of a line does not cover that line.
 fn selected_lines(range: Range<Point>) -> (u32, u32) {
@@ -132,7 +125,7 @@ struct LineCommentAddon {
     workspace_subscription: Option<Subscription>,
     block_ids: Vec<CustomBlockId>,
     collapsed_comments: HashSet<(PathBuf, u32)>,
-    _subscriptions: [Subscription; 4],
+    _subscriptions: [Subscription; 3],
 }
 
 enum LineCommentTargetHighlights {}
@@ -162,69 +155,28 @@ impl editor::Addon for LineCommentAddon {
             .contains(&row)
             .then(|| editor_comment_target(editor, selection.start..selection.end, cx))
             .flatten();
-        let add_target = selection_target.unwrap_or_else(|| line_target.clone());
-        let can_add = !store
-            .comments(&add_target.abs_path.to_string_lossy())
-            .iter()
-            .any(|comment| comment.line == add_target.first_line);
         let existing_comment = line_comment_at(
             store.comments(&line_target.abs_path.to_string_lossy()),
             line_target.first_line,
         );
-        if can_add || existing_comment.is_some() {
-            menu = menu.separator();
-        }
-        if can_add {
-            let editor = self.editor.clone();
-            menu = menu.entry(
-                "Add Line Comment",
-                Some(Box::new(AddLineComment)),
-                move |window, cx| {
-                    editor
-                        .update(cx, |editor, cx| {
-                            let task = prompt_line_comment(
-                                editor,
-                                anchor,
-                                add_target.clone(),
-                                CommentAction::Add,
-                                window,
-                                cx,
-                            );
-                            editor.detach_and_notify_err(task, window, cx);
-                        })
-                        .ok();
-                },
-            );
-        }
+        let mut target = selection_target.unwrap_or_else(|| line_target.clone());
         if let Some(comment) = existing_comment {
-            let done = comment.done;
-            let edit_editor = self.editor.clone();
-            let done_editor = self.editor.clone();
-            let mut target = line_target;
+            target = line_target;
             target.first_line = comment.line;
             target.last_line = comment.last_line();
-            menu = menu
-                .entry("Edit Line Comment", Some(Box::new(EditLineComment)), {
-                    let target = target.clone();
-                    move |window, cx| {
-                        edit_editor
-                            .update(cx, |editor, cx| {
-                                let task = prompt_line_comment(
-                                    editor,
-                                    anchor,
-                                    target.clone(),
-                                    CommentAction::Edit,
-                                    window,
-                                    cx,
-                                );
-                                editor.detach_and_notify_err(task, window, cx);
-                            })
-                            .ok();
-                    }
-                })
-                .entry(comment_done_icon(done).1, None, move |window, cx| {
-                    update_comment_done(&done_editor, &target, !done, window, cx);
-                });
+        }
+        menu = open_line_comment_entry(
+            menu.separator(),
+            self.editor.clone(),
+            anchor,
+            target.clone(),
+        );
+        if let Some(comment) = existing_comment {
+            let done = comment.done;
+            let done_editor = self.editor.clone();
+            menu = menu.entry(comment_done_icon(done).1, None, move |window, cx| {
+                update_comment_done(&done_editor, &target, !done, window, cx);
+            });
         }
         menu
     }
@@ -256,20 +208,10 @@ fn register_editor(editor: &mut Editor, cx: &mut Context<Editor>) {
                 _ => {}
             },
         );
-    let handle = cx.entity().downgrade();
-    let add_subscription = editor.register_action(move |_: &AddLineComment, window, cx| {
-        handle
-            .update(cx, |editor, cx| {
-                prompt_selected_lines(editor, CommentAction::Add, window, cx)
-            })
-            .ok();
-    });
     let handle = cx.weak_entity();
-    let edit_subscription = editor.register_action(move |_: &EditLineComment, window, cx| {
+    let prompt_subscription = editor.register_action(move |_: &OpenLineComment, window, cx| {
         handle
-            .update(cx, |editor, cx| {
-                prompt_selected_lines(editor, CommentAction::Edit, window, cx)
-            })
+            .update(cx, |editor, cx| prompt_selected_lines(editor, window, cx))
             .ok();
     });
     let handle = cx.weak_entity();
@@ -288,8 +230,7 @@ fn register_editor(editor: &mut Editor, cx: &mut Context<Editor>) {
         collapsed_comments: HashSet::default(),
         _subscriptions: [
             buffer_subscription,
-            add_subscription,
-            edit_subscription,
+            prompt_subscription,
             select_subscription,
         ],
     });
@@ -528,7 +469,6 @@ fn show_comments(editor: &mut Editor, cx: &mut Context<Editor>) {
 
 fn prompt_diff_comment(
     workspace: &mut Workspace,
-    action: CommentAction,
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
@@ -548,7 +488,7 @@ fn prompt_diff_comment(
         return;
     };
     let task = editor.update(cx, |editor, cx| {
-        prompt_line_comment(editor, anchor, target, action, window, cx)
+        prompt_line_comment(editor, anchor, target, window, cx)
     });
     task.detach_and_notify_err(cx.weak_entity(), window, cx);
 }
@@ -623,18 +563,13 @@ fn diff_comment_target(
 
 /// Handles the action for a buffer of a project file. Other buffers, such as the files of
 /// a past commit, go on to the handler of the view that shows them.
-fn prompt_selected_lines(
-    editor: &mut Editor,
-    action: CommentAction,
-    window: &mut Window,
-    cx: &mut Context<Editor>,
-) {
+fn prompt_selected_lines(editor: &mut Editor, window: &mut Window, cx: &mut Context<Editor>) {
     let selection = *editor.selections.newest_anchor();
     let Some(target) = editor_comment_target(editor, selection.start..selection.end, cx) else {
         cx.propagate();
         return;
     };
-    let task = prompt_line_comment(editor, selection.start, target, action, window, cx);
+    let task = prompt_line_comment(editor, selection.start, target, window, cx);
     editor.detach_and_notify_err(task, window, cx);
 }
 
@@ -655,15 +590,14 @@ fn editor_comment_target(editor: &Editor, range: Range<Anchor>, cx: &App) -> Opt
 fn line_comment_at(comments: &[LineComment], line: u32) -> Option<&LineComment> {
     comments
         .iter()
-        .rev()
-        .find(|comment| comment.line <= line && line <= comment.last_line())
+        .filter(|comment| comment.line <= line && line <= comment.last_line())
+        .max_by_key(|comment| comment.line)
 }
 
 fn prompt_line_comment(
     editor: &mut Editor,
     anchor: Anchor,
     target: CommentTarget,
-    action: CommentAction,
     window: &mut Window,
     cx: &mut Context<Editor>,
 ) -> Task<anyhow::Result<()>> {
@@ -675,48 +609,34 @@ fn prompt_line_comment(
     }
     let path = target.abs_path.to_string_lossy().into_owned();
     let comments = store.read(cx).comments(&path);
-    let existing = comments
-        .iter()
-        .find(|comment| comment.line == target.first_line);
-    let mut comment = match action {
-        CommentAction::Add if existing.is_some() => {
-            return Task::ready(Err(anyhow::anyhow!(
-                "A comment already starts on this line"
-            )));
-        }
-        CommentAction::Add => LineComment {
-            line: target.first_line,
-            end_line: (target.last_line > target.first_line).then_some(target.last_line),
-            text: String::new(),
-            done: false,
-            orphaned: false,
-            author: Author::Human,
-        },
-        CommentAction::Edit => {
-            let Some(comment) = existing.or_else(|| line_comment_at(comments, target.first_line))
-            else {
-                return Task::ready(Err(anyhow::anyhow!("There is no comment on this line")));
-            };
-            comment.clone()
-        }
-    };
+    let original = line_comment_at(comments, target.first_line).cloned();
+    let mut comment = original.clone().unwrap_or_else(|| LineComment {
+        line: target.first_line,
+        end_line: (target.last_line > target.first_line).then_some(target.last_line),
+        text: String::new(),
+        done: false,
+        orphaned: false,
+        author: Author::Human,
+    });
     let (sender, receiver) = async_channel::bounded(1);
     editor.show_inline_multiline_prompt(anchor, "Comment…", &comment.text, sender, window, cx);
-    let mut original = comment.clone();
     cx.spawn(async move |_, cx| {
         let Ok(Some(text)) = receiver.recv().await else {
             return Ok(());
         };
-        let revision = comment_revision(&original.text).or(target.revision.as_deref());
+        let revision = comment_revision(&comment.text).or(target.revision.as_deref());
         comment.text = with_revision(text.trim(), revision);
-        if comment.text.is_empty() && matches!(action, CommentAction::Add) {
-            return Ok(());
-        }
+        let Some(mut original) = original else {
+            return if comment.text.is_empty() {
+                Ok(())
+            } else {
+                store
+                    .update(cx, |store, cx| store.add_comment(&path, comment, cx))
+                    .await
+            };
+        };
         store
             .update(cx, |store, cx| {
-                if matches!(action, CommentAction::Add) {
-                    return store.add_comment(&path, comment, cx);
-                }
                 let Some(current) = store
                     .comments(&path)
                     .iter()
@@ -811,6 +731,26 @@ fn update_comment_done(
         .ok();
 }
 
+fn open_line_comment_entry(
+    menu: ContextMenu,
+    editor: WeakEntity<Editor>,
+    anchor: Anchor,
+    target: CommentTarget,
+) -> ContextMenu {
+    menu.entry(
+        "Open Line Comment",
+        Some(Box::new(OpenLineComment)),
+        move |window, cx| {
+            editor
+                .update(cx, |editor, cx| {
+                    let task = prompt_line_comment(editor, anchor, target.clone(), window, cx);
+                    editor.detach_and_notify_err(task, window, cx);
+                })
+                .ok();
+        },
+    )
+}
+
 fn render_comment(
     label: Option<SharedString>,
     done: bool,
@@ -848,26 +788,7 @@ fn render_comment(
             let collapse_editor = editor.clone();
             let comment_key = comment_key.clone();
             ContextMenu::build(window, cx, move |menu, _, _| {
-                menu.entry(
-                    "Edit Line Comment",
-                    Some(Box::new(EditLineComment)),
-                    move |window, cx| {
-                        editor
-                            .update(cx, |editor, cx| {
-                                let task = prompt_line_comment(
-                                    editor,
-                                    anchor,
-                                    target.clone(),
-                                    CommentAction::Edit,
-                                    window,
-                                    cx,
-                                );
-                                editor.detach_and_notify_err(task, window, cx);
-                            })
-                            .ok();
-                    },
-                )
-                .entry(
+                open_line_comment_entry(menu, editor, anchor, target).entry(
                     if expanded {
                         "Collapse Line Comment"
                     } else {

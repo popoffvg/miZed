@@ -19,11 +19,11 @@ use collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use futures::{StreamExt, stream::FuturesUnordered};
 use git::{CopyFilePermalink, OpenFilePermalink};
 use gpui::{
-    Action, Anchor, AnyElement, App, AsyncWindowContext, ClickEvent, ClipboardItem, Context, Div,
-    DragMoveEvent, Entity, EntityId, EventEmitter, ExternalPaths, FocusHandle, FocusOutEvent,
-    Focusable, KeyContext, MouseButton, NavigationDirection, Pixels, Point, PromptLevel, Render,
-    ScrollHandle, Subscription, Task, TaskExt, WeakEntity, WeakFocusHandle, Window, actions,
-    anchored, deferred, prelude::*,
+    Action, Anchor, AnyElement, AnyView, App, AsyncWindowContext, ClickEvent, ClipboardItem,
+    Context, Div, DragMoveEvent, Entity, EntityId, EventEmitter, ExternalPaths, FocusHandle,
+    FocusOutEvent, Focusable, KeyContext, MouseButton, NavigationDirection, Pixels, Point,
+    PromptLevel, Render, ScrollHandle, Subscription, Task, TaskExt, WeakEntity, WeakFocusHandle,
+    Window, actions, anchored, deferred, prelude::*,
 };
 use itertools::Itertools;
 use language::{Capability, DiagnosticSeverity};
@@ -403,6 +403,7 @@ pub struct Pane {
     ),
     focus_handle: FocusHandle,
     items: Vec<Box<dyn ItemHandle>>,
+    item_view_overrides: HashMap<EntityId, AnyView>,
     activation_history: Vec<ActivationHistoryEntry>,
     next_activation_timestamp: Arc<AtomicUsize>,
     zoomed: bool,
@@ -574,6 +575,7 @@ impl Pane {
             alternate_file_items: (None, None),
             focus_handle,
             items: Vec::new(),
+            item_view_overrides: HashMap::default(),
             activation_history: Vec::new(),
             next_activation_timestamp: next_timestamp.clone(),
             was_focused: false,
@@ -818,6 +820,25 @@ impl Pane {
 
     pub fn active_item_index(&self) -> usize {
         self.active_item_index
+    }
+
+    pub fn item_view_override(&self, item_id: EntityId) -> Option<&AnyView> {
+        self.item_view_overrides.get(&item_id)
+    }
+
+    /// The alternate view must use the item's focus handle.
+    pub fn set_item_view_override(
+        &mut self,
+        item_id: EntityId,
+        view: Option<AnyView>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(view) = view {
+            self.item_view_overrides.insert(item_id, view);
+        } else {
+            self.item_view_overrides.remove(&item_id);
+        }
+        cx.notify();
     }
 
     pub fn is_active_item_pinned(&self) -> bool {
@@ -1324,6 +1345,7 @@ impl Pane {
                     }
 
                     if removed_item.item_id() != item.item_id() {
+                        self.item_view_overrides.remove(&removed_item.item_id());
                         replaces_existing_item_in_pane = true;
                     }
                 }
@@ -2203,6 +2225,7 @@ impl Pane {
         }
 
         let item = self.items.remove(item_index);
+        self.item_view_overrides.remove(&item.item_id());
 
         cx.emit(Event::RemovedItem { item: item.clone() });
         if self.items.is_empty() {
@@ -4647,12 +4670,16 @@ impl Render for Pane {
                     })
                     .map(|div| {
                         if let Some(item) = self.active_item() {
+                            let view = self
+                                .item_view_override(item.item_id())
+                                .cloned()
+                                .unwrap_or_else(|| item.to_any_view());
                             div.id("pane_placeholder")
                                 .v_flex()
                                 .size_full()
                                 .overflow_hidden()
                                 .child(self.toolbar.clone())
-                                .child(item.to_any_view())
+                                .child(view)
                         } else {
                             let placeholder = div
                                 .id("pane_placeholder")

@@ -70,6 +70,7 @@ pub(super) fn start_mized_server(cx: &mut App) {
         });
         server.handle_request::<McpPing>(|_, _| Task::ready(Ok(json!({}))));
         server.add_tool(comment_tools::AddComment);
+        server.add_tool(comment_tools::EditComment);
         server.add_tool(comment_tools::ReadComment);
         server.add_tool(comment_tools::ListComments);
         server.add_tool(comment_tools::ClearComments);

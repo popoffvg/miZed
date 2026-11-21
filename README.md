@@ -39,6 +39,8 @@ With this setting, each terminal thread of the Agent Panel runs in a terminal of
 - A new terminal thread opens a tab in the Herdr space of the project folder. If the folder has no space, miZed creates one.
 - Close a row to remove it from the sidebar. The Herdr terminal continues to run.
 - The terminal title comes from Herdr, and the sidebar reads it every three seconds.
+- The Threads Sidebar shows a green check for Done, an amber warning for Needs Attention, and a muted circle for Idle. A spinner indicates work in progress.
+- A Claude triage hook can set `zed.claude_triage=question` with `hc label` when a reply needs an answer. Clear the label on the next prompt to restore the usual status.
 - Hold Shift and drag to select text when a terminal app uses the mouse.
 
 Herdr terminals are local. A remote project uses the usual Zed terminals.
@@ -85,7 +87,7 @@ Enter sends the text as a JSON string. Escape cancels, and the result is `null`.
 
 ### Line comments
 
-Run `line comments: add line comment` to add a comment to the selected lines in a file, diff, or commit. Press Enter to save it. Click the gutter icon to collapse or expand the comment. Right-click the icon and select **Edit Line Comment** to edit it inline. Clear the text and press Enter to delete it. Run `line comments: list line comments` to search the active store and jump to a comment. Comments on past commits include the revision because miZed stores their lines against the working tree.
+Run `line comments: open line comment` in a file, diff, or commit. The command opens the comment on the first selected line or starts a comment for the selected lines. Press Enter to save. Press Shift+Enter to add a new line. To delete a comment, clear the text and press Enter. The gutter menu also has **Open Line Comment**. Run `line comments: list line comments` to search the active store and jump to a comment. Comments on past commits include the revision because miZed stores their lines against the working tree.
 
 miZed keeps the comments of a workspace in `~/Library/Application Support/Zed/line_comments/<workspace id>.json`, keyed by the absolute path of each file. A change to that file shows at once. Bind the action in your keymap, for example:
 
@@ -93,7 +95,7 @@ miZed keeps the comments of a workspace in `~/Library/Application Support/Zed/li
 [
   {
     "context": "Editor",
-    "bindings": { "cmd-.": "line_comments::AddLineComment" }
+    "bindings": { "cmd-.": "line_comments::OpenLineComment" }
   }
 ]
 ```
@@ -106,7 +108,7 @@ Run `hc get "$HC_TERMINAL_ID" --json` in a new miZed Herdr terminal. Find the `z
 
 ### miZed MCP
 
-Build miZed and the MCP bridge from the checkout. Start miZed with the address file set. Use the same address file in the Codex configuration.
+Build miZed and the MCP bridge from the checkout. Use `$HOME/.mized-mcp-address` for miZed and the bridge. Quit any other miZed instance that uses that file before you start miZed.
 
 ```sh
 cargo build --locked -p zed -p mized_mcp --bin zed --bin mized-mcp
@@ -123,6 +125,7 @@ tool_timeout_sec = 900
 ```
 
 - `add_comment`, `read_comment`, and `list_comments` use named stores per workspace. Pass `store` to select a named store. The default is `default`.
+- `edit_comment` updates an existing comment in the selected store. Pass its absolute `path` and first `line`. Pass `text`, `done`, or both. Set `done` to `true` to mark it done or `false` to reopen it.
 - `clear_comments` deletes open and done comments from the selected store and returns the count. Pass an absolute `path` to clear one file. Omit `path` to clear the entire store.
 - `open_file` opens an existing local file by absolute path. Set `wait_for_close` to wait for the tab to close.
 - `open_multibuffer` opens excerpts from local files in one editor tab. Give each excerpt an absolute path and an inclusive line range. The tool groups excerpts from each file at that file's first position in the request. Set `wait_for_close` to wait for the tab to close.

@@ -205,7 +205,8 @@
   {
     "context": "MultilineTextPrompt > Editor",
     "bindings": {
-      "enter": "editor::Newline",
+      "enter": "editor::NewlineBelow",
+      "shift-enter": "editor::Newline",
       "cmd-enter": "editor::NewlineBelow",
     },
   },

@@ -56,7 +56,7 @@ use zed_actions::{DecreaseBufferFontSize, IncreaseBufferFontSize, ResetBufferFon
 use crate::markdown_preview_settings::MarkdownPreviewSettings;
 use crate::{
     CloseAndReturnToEditor, OpenFollowingPreview, OpenPreview, OpenPreviewToTheSide, ScrollDown,
-    ScrollDownByItem,
+    ScrollDownByItem, TogglePreviewInPlace,
 };
 use crate::{ScrollPageDown, ScrollPageUp, ScrollToBottom, ScrollToTop, ScrollUp, ScrollUpByItem};
 
@@ -214,6 +214,10 @@ impl MarkdownPreviewView {
             }
         });
 
+        workspace.register_action(|workspace, _: &TogglePreviewInPlace, window, cx| {
+            Self::toggle_preview_in_place(workspace, window, cx);
+        });
+
         workspace.register_action(move |workspace, _: &OpenFollowingPreview, window, cx| {
             if let Some(editor) = Self::resolve_active_item_as_markdown_editor(workspace, cx) {
                 // Check if there's already a following preview
@@ -237,6 +241,40 @@ impl MarkdownPreviewView {
                 }
                 cx.notify();
             }
+        });
+    }
+
+    fn toggle_preview_in_place(
+        workspace: &mut Workspace,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) {
+        let Some(item) = workspace.item_for_action(window, cx) else {
+            return;
+        };
+        let Some(editor) = item.downcast::<Editor>() else {
+            return;
+        };
+        let Some(pane) = workspace.pane_for_item_id(item.item_id()) else {
+            return;
+        };
+        let editor_id = editor.entity_id();
+        let view = if pane
+            .read(cx)
+            .item_view_override(editor_id)
+            .is_some_and(|view| view.entity_type() == TypeId::of::<Self>())
+        {
+            None
+        } else if Self::is_markdown_editor(workspace, &editor, cx) {
+            let focus = editor.focus_handle(cx);
+            let preview = Self::create_markdown_view(workspace, editor, window, cx);
+            preview.update(cx, |preview, _| preview.focus_handle = focus);
+            Some(preview.into())
+        } else {
+            return;
+        };
+        pane.update(cx, |pane, cx| {
+            pane.set_item_view_override(editor_id, view, cx)
         });
     }
 
@@ -1036,6 +1074,17 @@ impl MarkdownPreviewView {
         window.defer(cx, move |window, cx| {
             workspace.update(cx, |workspace, cx| {
                 let Some(pane) = workspace.pane_for_item_id(preview_id) else {
+                    if let Some(pane) = workspace.pane_for_item_id(editor.entity_id()) {
+                        pane.update(cx, |pane, cx| {
+                            let editor_id = editor.entity_id();
+                            if pane
+                                .item_view_override(editor_id)
+                                .is_some_and(|view| view.entity_id() == preview_id)
+                            {
+                                pane.set_item_view_override(editor_id, None, cx);
+                            }
+                        });
+                    }
                     return;
                 };
                 if !workspace.activate_item(&editor, true, true, window, cx) {
@@ -2357,11 +2406,11 @@ mod persistence {
 
 #[cfg(test)]
 mod tests {
-    use crate::CloseAndReturnToEditor;
     use crate::markdown_preview_view::ImageSource;
     use crate::markdown_preview_view::Resource;
     use crate::markdown_preview_view::resolve_preview_image;
     use crate::markdown_preview_view::resolve_project_path_for_preview_image;
+    use crate::{CloseAndReturnToEditor, TogglePreviewInPlace};
     use buffer_diff::BufferDiff;
     use editor::Editor;
     use editor::items::open_resolved_target;
@@ -3629,6 +3678,70 @@ mod tests {
                 "going back should return to the preview"
             );
         });
+    }
+
+    #[gpui::test]
+    async fn toggle_preview_in_place_preserves_the_tab_and_cursor(cx: &mut TestAppContext) {
+        let text = format!(
+            "# Note\n\n{}Target paragraph.",
+            "Filler paragraph.\n\n".repeat(100)
+        );
+        let source_index = text.find("Target").unwrap() + 3;
+        let (project, _, multi_workspace) =
+            markdown_workspace(cx, json!({ "note.md": text }), false).await;
+        let editor = open_project_file(cx, &project, &multi_workspace, "note.md", None, true)
+            .await
+            .downcast::<Editor>()
+            .unwrap();
+        let (pane, tab_index) = multi_workspace
+            .update(cx, |multi_workspace, window, cx| {
+                MarkdownPreviewView::change_selection_to_source_index(
+                    &editor,
+                    source_index,
+                    true,
+                    window,
+                    cx,
+                );
+                let pane = multi_workspace.workspace().read(cx).active_pane().clone();
+                let tab_index = pane.read(cx).active_item_index();
+                window.dispatch_action(Box::new(TogglePreviewInPlace), cx);
+                (pane, tab_index)
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        multi_workspace
+            .update(cx, |multi_workspace, window, cx| {
+                let workspace = multi_workspace.workspace().read(cx);
+                assert_eq!(workspace.active_pane(), &pane);
+                let pane = pane.read(cx);
+                assert_eq!(pane.active_item_index(), tab_index);
+                assert_eq!(pane.items_len(), 1);
+                assert_eq!(pane.active_item().unwrap().item_id(), editor.entity_id());
+                let preview = pane
+                    .item_view_override(editor.entity_id())
+                    .unwrap()
+                    .clone()
+                    .downcast::<MarkdownPreviewView>()
+                    .unwrap();
+                assert_eq!(preview.read(cx).active_source_index, Some(source_index));
+                assert!(preview.read(cx).scroll_handle.offset().y < px(0.));
+                assert!(preview.focus_handle(cx).is_focused(window));
+                window.dispatch_action(Box::new(TogglePreviewInPlace), cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        assert_editor_is_active_and_focused(cx, &multi_workspace, &editor);
+        assert!(pane.read_with(cx, |pane, _| {
+            pane.item_view_override(editor.entity_id()).is_none()
+        }));
+        assert_eq!(
+            editor.update(cx, |editor, cx| MarkdownPreviewView::selected_source_index(
+                editor, cx
+            )),
+            Some(source_index)
+        );
     }
 
     #[gpui::test]

@@ -17,6 +17,9 @@ use super::{WorkspaceTarget, mcp_response, mized_workspace};
 pub(super) struct AddComment;
 
 #[derive(Clone)]
+pub(super) struct EditComment;
+
+#[derive(Clone)]
 pub(super) struct ReadComment;
 
 #[derive(Clone)]
@@ -59,6 +62,19 @@ pub(super) struct AddCommentInput {
     /// Inclusive last line, starting at 1.
     end_line: Option<u32>,
     text: String,
+}
+
+/// Edit an existing line comment. Pass text, done, or both.
+#[derive(Deserialize, JsonSchema)]
+pub(super) struct EditCommentInput {
+    #[serde(flatten)]
+    store: CommentStoreTarget,
+    #[serde(flatten)]
+    location: CommentLocation,
+    /// Replacement text. Omit to keep the current text.
+    text: Option<String>,
+    /// Set true to mark the comment done. Set false to reopen it.
+    done: Option<bool>,
 }
 
 /// Read the line comment that starts on a line in a named miZed workspace store.
@@ -142,6 +158,44 @@ impl McpServerTool for AddComment {
             })
         });
         save.await?;
+        mcp_response(comment_result(&path, Some(&comment))?)
+    }
+}
+
+impl McpServerTool for EditComment {
+    type Input = EditCommentInput;
+    type Output = CommentResult;
+    const NAME: &'static str = "edit_comment";
+
+    fn annotations(&self) -> ToolAnnotations {
+        ToolAnnotations {
+            idempotent_hint: Some(true),
+            ..comment_annotations(false)
+        }
+    }
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> Result<ToolResponse<Self::Output>> {
+        input.location.validate()?;
+        let CommentLocation { path, line } = input.location;
+        let text = input.text.map(|text| text.trim().to_owned());
+        ensure!(
+            text.is_some() || input.done.is_some(),
+            "Pass text or done to edit the line comment"
+        );
+        ensure!(
+            text.as_ref().is_none_or(|text| !text.is_empty()),
+            "Use non-empty text to edit the line comment"
+        );
+
+        let store = open_comment_store(input.store, cx).await?;
+        let save = store.update(cx, |store, cx| {
+            store.edit_comment(&path, line, text, input.done, cx)
+        });
+        let comment = save.await?;
         mcp_response(comment_result(&path, Some(&comment))?)
     }
 }

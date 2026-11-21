@@ -21,7 +21,7 @@ use util::path;
 use workspace::MultiWorkspace;
 
 use crate::{
-    AddLineComment, Author, CommentStoreName, EditLineComment, LineComment, ListLineComments,
+    Author, CommentStoreName, LineComment, ListLineComments, OpenLineComment,
     SelectLineCommentStore, comment_store::STORE_VERSION,
     comment_store_path::line_comment_store_path,
 };
@@ -345,7 +345,7 @@ async fn test_comment_icon_toggles_and_its_menu_edits(cx: &mut TestAppContext) {
     cx.simulate_mouse_up(position, MouseButton::Right, Default::default());
     cx.run_until_parked();
     let edit = cx
-        .debug_bounds("MENU_ITEM-Edit Line Comment")
+        .debug_bounds("MENU_ITEM-Open Line Comment")
         .expect("The comment menu must contain an edit action");
     cx.simulate_click(edit.center(), Default::default());
     cx.run_until_parked();
@@ -394,20 +394,13 @@ async fn test_list_line_comments_searches_and_opens_the_matching_line(cx: &mut T
 #[gpui::test]
 async fn test_prompt_writes_changes_and_deletes_a_comment(cx: &mut TestAppContext) {
     let (fs, editor, store_path, mut cx) = open_file(FILE, None, cx).await;
-    let submit_key = if cfg!(target_os = "macos") {
-        "cmd-enter"
-    } else {
-        "ctrl-enter"
-    };
     cx.update(|_, cx| {
-        cx.bind_keys([
-            gpui::KeyBinding::new("enter", Newline, Some("MultilineTextPrompt > Editor")),
-            gpui::KeyBinding::new(
-                submit_key,
-                NewlineBelow,
-                Some("MultilineTextPrompt > Editor"),
-            ),
-        ]);
+        let bindings = settings::KeymapFile::load_asset_allow_partial_failure(
+            settings::DEFAULT_KEYMAP_PATH,
+            cx,
+        )
+        .expect("The default keymap must load");
+        cx.bind_keys(bindings);
     });
     let select_lines = |range, cx: &mut VisualTestContext| {
         editor.update_in(cx, |editor, window, cx| {
@@ -423,16 +416,16 @@ async fn test_prompt_writes_changes_and_deletes_a_comment(cx: &mut TestAppContex
         cx.dispatch_action(Backspace);
         for (index, line) in text.split('\n').enumerate() {
             if index > 0 {
-                cx.simulate_keystrokes("enter");
+                cx.simulate_keystrokes("shift-enter");
             }
             cx.simulate_input(line);
         }
-        cx.simulate_keystrokes(submit_key);
+        cx.simulate_keystrokes("enter");
         cx.run_until_parked();
     };
 
     select_lines(Point::new(1, 0)..Point::new(3, 0), &mut cx);
-    cx.dispatch_action(AddLineComment);
+    cx.dispatch_action(OpenLineComment);
     submit("rename\nwith reason", &mut cx);
     assert_eq!(
         stored_comments(&fs, &store_path).await,
@@ -469,7 +462,16 @@ async fn test_prompt_writes_changes_and_deletes_a_comment(cx: &mut TestAppContex
     );
 
     select_lines(Point::new(2, 0)..Point::new(2, 0), &mut cx);
-    cx.dispatch_action(EditLineComment);
+    cx.dispatch_action(OpenLineComment);
+    cx.run_until_parked();
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(
+        stored_comments(&fs, &store_path).await["files"][FILE][0]["text"],
+        "rename\nwith reason"
+    );
+
+    cx.dispatch_action(OpenLineComment);
     submit("keep", &mut cx);
     assert_eq!(
         stored_comments(&fs, &store_path).await["files"][FILE][0],
@@ -488,7 +490,7 @@ async fn test_prompt_writes_changes_and_deletes_a_comment(cx: &mut TestAppContex
             .is_none()
     );
 
-    cx.dispatch_action(EditLineComment);
+    cx.dispatch_action(OpenLineComment);
     submit("", &mut cx);
     assert_eq!(
         stored_comments(&fs, &store_path).await,
@@ -530,7 +532,7 @@ async fn test_named_comment_store_keeps_separate_comments(cx: &mut TestAppContex
 
     select_store("review", &mut cx);
     assert!(!editor_content_with_blocks(&editor, &mut cx).contains("default comment"));
-    cx.dispatch_action(AddLineComment);
+    cx.dispatch_action(OpenLineComment);
     cx.run_until_parked();
     cx.simulate_input("review comment");
     cx.dispatch_action(NewlineBelow);
@@ -560,7 +562,7 @@ async fn test_file_outside_the_workspace_folders_uses_the_workspace_store(cx: &m
         });
         window.focus(&editor.focus_handle(cx), cx);
     });
-    cx.dispatch_action(AddLineComment);
+    cx.dispatch_action(OpenLineComment);
     cx.run_until_parked();
     cx.simulate_input("tighten");
     cx.dispatch_action(NewlineBelow);
