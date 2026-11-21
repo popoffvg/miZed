@@ -8,7 +8,7 @@ mod unix {
     use std::{
         ffi::OsStr,
         fs,
-        io::{self, BufRead as _, BufReader, Write as _},
+        io::{self, BufRead as _, BufReader, Read as _, Write as _},
         os::unix::{ffi::OsStrExt as _, net::UnixStream},
         path::Path,
         thread,
@@ -39,13 +39,20 @@ mod unix {
                 let name = name.to_str().context("Use a UTF-8 miZed MCP tool name")?;
                 let input = arguments.next();
                 ensure!(arguments.next().is_none(), "{USAGE}");
-                let input: Value = match input.as_deref() {
-                    None => json!({}),
-                    Some(input) if input == "-" => serde_json::from_reader(io::stdin().lock())
-                        .context("Could not read miZed MCP tool arguments from stdin")?,
-                    Some(input) => serde_json::from_slice(input.as_bytes())
-                        .context("Could not parse miZed MCP tool arguments")?,
+                let input = match input {
+                    None => b"{}".to_vec(),
+                    Some(input) if input == "-" => {
+                        let mut input = Vec::new();
+                        io::stdin()
+                            .lock()
+                            .read_to_end(&mut input)
+                            .context("Could not read miZed MCP tool arguments from stdin")?;
+                        input
+                    }
+                    Some(input) => input.into_encoded_bytes(),
                 };
+                let input: Value = serde_json::from_slice(&input)
+                    .context("Could not parse miZed MCP tool arguments")?;
                 ensure!(
                     input.is_object(),
                     "Pass miZed MCP tool arguments as a JSON object"
