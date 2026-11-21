@@ -6638,7 +6638,7 @@ impl Sidebar {
             .herdr_thread_status(terminal.metadata.terminal_id);
         let (icon, icon_color, row_status) = match status {
             Some(HerdrThreadStatus::Done) => (
-                IconName::Check,
+                IconName::Circle,
                 Color::Success,
                 AgentThreadStatus::Completed,
             ),
