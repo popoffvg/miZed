@@ -125,12 +125,13 @@ async fn test_mcp_clear_comments_respects_file_and_store(cx: &mut TestAppContext
 }
 
 #[gpui::test]
-async fn test_mcp_focus_chat_after_tab_close(cx: &mut TestAppContext) {
+async fn test_mcp_focus_chat_after_moved_tab_closes(cx: &mut TestAppContext) {
     init_test(cx);
     let fs = FakeFs::new(cx.executor());
     fs.insert_tree("/project", json!({ "file.txt": "first\nsecond\n" }))
         .await;
-    let project = Project::test(fs, [Path::new("/project")], cx).await;
+    let project = Project::test(fs.clone(), [Path::new("/project")], cx).await;
+    let other = Project::test(fs, [], cx).await;
     let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
     let mut window_cx = VisualTestContext::from_window(window.into(), cx);
     let workspace = window
@@ -160,11 +161,32 @@ async fn test_mcp_focus_chat_after_tab_close(cx: &mut TestAppContext) {
     assert!(!focused_chat.get());
     let pane = workspace.read_with(&window_cx, |workspace, _| workspace.active_pane().clone());
     assert_eq!(pane.read_with(&window_cx, |pane, _| pane.items_len()), 1);
-    pane.update_in(&mut window_cx, |pane, window, cx| {
-        pane.close_active_item(&CloseActiveItem::default(), window, cx)
-    })
-    .await
-    .unwrap();
+    let destination = window
+        .update(&mut window_cx, |root, window, cx| {
+            root.add(workspace.clone(), window, cx);
+            let destination = root.test_add_workspace(other, window, cx);
+            let destination = destination.read(cx).active_pane().clone();
+            let item = pane.read(cx).active_item().unwrap().item_id();
+            workspace::move_item(&pane, &destination, item, 0, true, window, cx);
+            destination
+        })
+        .unwrap();
+    window_cx.run_until_parked();
+    assert!(!completed.get());
+    assert_eq!(
+        destination.read_with(&window_cx, |pane, _| pane.items_len()),
+        1
+    );
+    let close = window
+        .update(&mut window_cx, |root, window, cx| {
+            let close = destination.update(cx, |pane, cx| {
+                pane.close_active_item(&CloseActiveItem::default(), window, cx)
+            });
+            root.activate(workspace.clone(), None, window, cx);
+            close
+        })
+        .unwrap();
+    close.await.unwrap();
     assert_eq!(task.await, json!({ "title": "Review", "excerpt_count": 1 }));
     window_cx.run_until_parked();
     assert!(focused_chat.get());

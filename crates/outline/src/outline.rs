@@ -422,7 +422,7 @@ impl PickerDelegate for OutlineViewDelegate {
                         .iter()
                         .enumerate()
                         .filter_map(|(ix, entry)| {
-                            let item = &this.delegate.outline.items[entry.candidate_id()];
+                            let item = &this.delegate.symbols.items[entry.candidate_id()];
                             let range = item.range.to_offset(&buffer);
                             range.contains(&cursor_offset).then_some((ix, item.depth))
                         })

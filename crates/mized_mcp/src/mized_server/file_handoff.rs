@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use workspace::{MultiWorkspace, OpenOptions, Workspace, item::Item};
 use zed_actions::assistant::FocusAgent;
 
-use super::{WorkspaceTarget, mcp_response, mized_workspace};
+use super::{WorkspaceTarget, local_workspaces, mcp_response, mized_workspace};
 
 #[derive(Clone)]
 pub(super) struct OpenFile;
@@ -318,27 +318,31 @@ async fn wait_for_tab_close(
     focus: ChatFocusOnClose,
     cx: &mut AsyncApp,
 ) -> Result<()> {
-    let (sender, receiver) = oneshot::channel();
-    let subscription = cx.update(|cx| {
-        if !workspace.read(cx).items(cx).any(|item| item.item_id() == item_id) {
-            return None;
-        }
-        let mut sender = Some(sender);
-        Some(cx.subscribe(&workspace, move |workspace, event, cx| {
-            if matches!(event, workspace::Event::ItemRemoved { item_id: removed } if *removed == item_id)
-                && !workspace.read(cx).items(cx).any(|item| item.item_id() == item_id)
-                && let Some(sender) = sender.take()
-            {
-                sender.send(()).ok();
-            }
-        }))
-    });
     let workspace_id = workspace.entity_id();
     drop(workspace);
-    if let Some(_subscription) = subscription {
-        receiver
-            .await
-            .context("miZed dropped the workspace before the tab closed")?;
+    loop {
+        let (sender, receiver) = oneshot::channel();
+        let subscription = cx.update(|cx| {
+            let (_, owner) = local_workspaces(cx).find(|(_, workspace)| {
+                workspace.read(cx).items(cx).any(|item| item.item_id() == item_id)
+            })?;
+            let owner = owner.clone();
+            let mut sender = Some(sender);
+            Some(cx.subscribe(&owner, move |workspace, event, cx| {
+                if matches!(event, workspace::Event::ItemRemoved { item_id: removed } if *removed == item_id)
+                    && !workspace.read(cx).items(cx).any(|item| item.item_id() == item_id)
+                    && let Some(sender) = sender.take()
+                {
+                    sender.send(()).ok();
+                }
+            }))
+        });
+        let Some(_subscription) = subscription else {
+            break;
+        };
+        if receiver.await.is_err() {
+            break;
+        }
     }
     if focus.focus_chat_on_close {
         cx.update(|cx| {

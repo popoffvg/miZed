@@ -196,14 +196,18 @@ async fn test_comment_save_preserves_external_changes_before_reload(cx: &mut Tes
     )
     .await
     .unwrap();
-    let save = store.update(&mut cx, |store, cx| {
-        store.set_comment_done(FILE, 1, false, cx)
+    let (reopen, rename) = store.update(&mut cx, |store, cx| {
+        (
+            store.edit_comment(FILE, 1, None, Some(false), cx),
+            store.edit_comment(FILE, 1, Some("renamed".into()), None, cx),
+        )
     });
-    assert!(save.await.is_err());
-    assert_eq!(
-        store.read_with(&cx, |store, _| store.comments(FILE)[0].text.clone()),
-        "external edit"
-    );
+    let reopened = reopen.await.unwrap();
+    assert_eq!(reopened.text, "external edit");
+    assert!(!reopened.done);
+    let renamed = rename.await.unwrap();
+    assert_eq!(renamed.text, "renamed");
+    assert!(!renamed.done);
     fs.unpause_events_and_flush();
 }
 

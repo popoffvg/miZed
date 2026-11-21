@@ -28,12 +28,26 @@ struct CommentSave {
     store: Entity<CommentStore>,
     revision: u64,
     change: CommentChange,
-    reply: oneshot::Sender<anyhow::Result<usize>>,
+    reply: oneshot::Sender<anyhow::Result<CommentSaveResult>>,
 }
 
 enum CommentChange {
     Edit(CommentEdit),
-    Clear { path: Option<String> },
+    Patch {
+        path: String,
+        line: u32,
+        text: Option<String>,
+        done: Option<bool>,
+    },
+    Clear {
+        path: Option<String>,
+    },
+}
+
+#[derive(Default)]
+struct CommentSaveResult {
+    cleared: usize,
+    edited: Option<LineComment>,
 }
 
 struct CommentEdit {
@@ -121,7 +135,7 @@ impl CommentStore {
                         match write_comment_change(fs.as_ref(), &path, change, recreate_folder)
                             .await
                         {
-                            Ok((files, cleared)) => (Ok(cleared), Some(files)),
+                            Ok((files, result)) => (Ok(result), Some(files)),
                             Err(error) => (Err(error), load_store(fs.as_ref(), &path).await.ok()),
                         }
                     })
@@ -221,34 +235,21 @@ impl CommentStore {
         done: Option<bool>,
         cx: &mut Context<Self>,
     ) -> Task<anyhow::Result<LineComment>> {
-        let Some(comment) = self
-            .comments(path)
-            .iter()
-            .find(|comment| comment.line == line)
-        else {
-            return Task::ready(Err(anyhow::anyhow!("The line comment no longer exists")));
-        };
-        let mut replacement = comment.clone();
-        if let Some(text) = text {
-            replacement.text = text;
+        if !Path::new(path).is_absolute() {
+            return Task::ready(Err(anyhow::anyhow!(
+                "Edit line comments with an absolute file path"
+            )));
         }
-        if let Some(done) = done {
-            replacement.done = done;
-        }
-        if replacement == *comment && self.revision == self.completed_revision {
-            return Task::ready(Ok(replacement));
-        }
-        let save = self.save_change(
-            path,
-            line,
-            Some(comment.clone()),
-            Some(replacement.clone()),
+        self.save(
+            CommentChange::Patch {
+                path: path.to_owned(),
+                line,
+                text,
+                done,
+            },
+            |result| result.edited.context("The line comment edit has no result"),
             cx,
-        );
-        cx.spawn(async move |_, _| {
-            save.await?;
-            Ok(replacement)
-        })
+        )
     }
 
     /// Remove the comment that starts on this line, and save the store.
@@ -281,7 +282,7 @@ impl CommentStore {
             CommentChange::Clear {
                 path: path.map(str::to_owned),
             },
-            |cleared| cleared,
+            |result| Ok(result.cleared),
             cx,
         )
     }
@@ -306,7 +307,7 @@ impl CommentStore {
                 previous,
                 replacement,
             }),
-            |_| (),
+            |_| Ok(()),
             cx,
         )
     }
@@ -314,7 +315,7 @@ impl CommentStore {
     fn save<T: 'static>(
         &mut self,
         change: CommentChange,
-        output: impl FnOnce(usize) -> T + 'static,
+        output: impl FnOnce(CommentSaveResult) -> anyhow::Result<T> + 'static,
         cx: &mut Context<Self>,
     ) -> Task<anyhow::Result<T>> {
         let revision = self.revision + 1;
@@ -335,10 +336,10 @@ impl CommentStore {
         }
         self.revision = revision;
         cx.spawn(async move |_, _| {
-            let cleared = result
+            let result = result
                 .await
                 .context("The line comment save did not complete")??;
-            Ok(output(cleared))
+            output(result)
         })
     }
 }
@@ -348,37 +349,59 @@ async fn write_comment_change(
     path: &Path,
     change: CommentChange,
     recreate_folder: bool,
-) -> anyhow::Result<(BTreeMap<String, Vec<LineComment>>, usize)> {
+) -> anyhow::Result<(BTreeMap<String, Vec<LineComment>>, CommentSaveResult)> {
     if recreate_folder && let Some(folder) = path.parent() {
         fs.create_dir(folder).await?;
     }
-    let mut files = load_store(fs, path).await?;
-    let cleared = match change {
+    let previous_files = load_store(fs, path).await?;
+    let mut files = previous_files.clone();
+    let mut result = CommentSaveResult::default();
+    match change {
         CommentChange::Edit(edit) => {
             apply_comment_edit(&mut files, edit)?;
-            0
+        }
+        CommentChange::Patch {
+            path,
+            line,
+            text,
+            done,
+        } => {
+            let comment = files
+                .get_mut(&path)
+                .and_then(|comments| comments.iter_mut().find(|comment| comment.line == line))
+                .context("The line comment no longer exists")?;
+            if let Some(text) = text {
+                comment.text = text;
+            }
+            if let Some(done) = done {
+                comment.done = done;
+            }
+            result.edited = Some(comment.clone());
         }
         CommentChange::Clear { path } => {
-            let cleared = if let Some(path) = path {
+            result.cleared = if let Some(path) = path {
                 files.remove(&path).map_or(0, |comments| comments.len())
             } else {
                 let cleared = files.values().map(Vec::len).sum();
                 files.clear();
                 cleared
             };
-            if cleared == 0 {
-                return Ok((files, cleared));
-            }
-            cleared
         }
-    };
+    }
+    if files == previous_files {
+        return Ok((files, result));
+    }
     let store_file = StoreFile {
         version: STORE_VERSION,
         files,
     };
     let text = serde_json::to_string_pretty(&store_file)?;
+    anyhow::ensure!(
+        load_store(fs, path).await? == previous_files,
+        "The line comment store changed during the save"
+    );
     fs.atomic_write(path.to_path_buf(), text).await?;
-    Ok((store_file.files, cleared))
+    Ok((store_file.files, result))
 }
 
 fn apply_comment_edit(
@@ -411,41 +434,46 @@ async fn watch_store(
     let Some(folder) = path.parent() else {
         return;
     };
-    fs.create_dir(folder).await.log_err();
-    let (mut events, _watcher) = fs.watch(folder, STORE_WATCH_LATENCY).await;
-    loop {
-        let Ok(revision) = store.read_with(cx, |store, _| {
-            (store.revision == store.completed_revision).then_some(store.revision)
-        }) else {
-            return;
-        };
-        let Some(revision) = revision else {
-            cx.background_executor().timer(STORE_WATCH_LATENCY).await;
-            continue;
-        };
-        let files = load_store(fs.as_ref(), &path).await.log_err();
-        let Ok(applied) = store.update(cx, |store, cx| {
-            if revision != store.revision {
-                return false;
-            }
-            store.loaded = files.is_some();
-            if let Some(files) = files {
-                store.files = files;
-            }
-            cx.notify();
-            true
-        }) else {
-            return;
-        };
-        if !applied {
-            continue;
-        }
+    'watch: loop {
+        fs.create_dir(folder).await.log_err();
+        let (mut events, _watcher) = fs.watch(folder, STORE_WATCH_LATENCY).await;
         loop {
-            let Some(events) = events.next().await else {
+            let Ok(revision) = store.read_with(cx, |store, _| {
+                (store.revision == store.completed_revision).then_some(store.revision)
+            }) else {
                 return;
             };
-            if events.iter().any(|event| event.path == path) {
-                break;
+            let Some(revision) = revision else {
+                cx.background_executor().timer(STORE_WATCH_LATENCY).await;
+                continue;
+            };
+            let files = load_store(fs.as_ref(), &path).await.log_err();
+            let Ok(applied) = store.update(cx, |store, cx| {
+                if revision != store.revision {
+                    return false;
+                }
+                store.loaded = files.is_some();
+                if let Some(files) = files {
+                    store.files = files;
+                }
+                cx.notify();
+                true
+            }) else {
+                return;
+            };
+            if !applied {
+                continue;
+            }
+            loop {
+                let Some(events) = events.next().await else {
+                    return;
+                };
+                if events.iter().any(|event| event.path == folder) {
+                    continue 'watch;
+                }
+                if events.iter().any(|event| event.path == path) {
+                    break;
+                }
             }
         }
     }

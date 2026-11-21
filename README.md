@@ -102,6 +102,8 @@ miZed keeps the comments of a workspace in `~/Library/Application Support/Zed/li
 ]
 ```
 
+Use the editor or MCP tools for concurrent changes to a store. Coordinate direct JSON edits with other writers.
+
 Use `line comments: select line comment store` in a file or diff. Enter a name such as `review` or `notes`. miZed creates the store when you save its first comment. The selection applies to all editors in the workspace. Select `default` to see the existing comments again. Reopened workspaces start with the default store.
 
 Build the comment reader from the miZed checkout with `cargo build --locked -p line_comments --bin list-line-comments`. Add the checkout's absolute `target/debug` path to your shell's `PATH`.
