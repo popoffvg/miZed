@@ -149,6 +149,11 @@ Download the CLI archive from the same release as the app. Extract `mized-mcp` i
 ```sh
 MIZED_MCP_ADDRESS_FILE="$HOME/.mized-mcp-address" \
   /Applications/miZed.app/Contents/MacOS/zed "$PWD" &
+```
+
+After miZed opens, check the connection.
+
+```sh
 mized-mcp "$HOME/.mized-mcp-address" list
 ```
 

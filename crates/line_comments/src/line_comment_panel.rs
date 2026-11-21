@@ -173,7 +173,7 @@ fn append_comment_tree(
     for comment in comments {
         let root = project
             .find_worktree(&comment.path, cx)
-            .map(|(worktree, _)| worktree.read(cx).abs_path().clone());
+            .map(|(worktree, _)| worktree.read(cx).abs_path());
         let mut path: Vec<_> = comment
             .path
             .ancestors()
