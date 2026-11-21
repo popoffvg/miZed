@@ -26,8 +26,20 @@ editor.workspace = true
 futures.workspace = true
 language.workspace = true
 line_comments.workspace = true
+project.workspace = true
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
 workspace.workspace = true
+zed_actions.workspace = true
+
+[target.'cfg(unix)'.dev-dependencies]
+fs = { workspace = true, features = ["test-support"] }
+gpui = { workspace = true, features = ["test-support"] }
+project = { workspace = true, features = ["test-support"] }
+remote_connection = { workspace = true, features = ["test-support"] }
+settings = { workspace = true, features = ["test-support"] }
+theme.workspace = true
+theme_settings.workspace = true
+workspace = { workspace = true, features = ["test-support"] }

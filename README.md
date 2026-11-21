@@ -123,11 +123,20 @@ tool_timeout_sec = 900
 ```
 
 - `add_comment`, `read_comment`, and `list_comments` use named stores per workspace. Pass `store` to select a named store. The default is `default`.
+- `clear_comments` deletes open and done comments from the selected store and returns the count. Pass an absolute `path` to clear one file. Omit `path` to clear the entire store.
 - `open_file` opens an existing local file by absolute path. Set `wait_for_close` to wait for the tab to close.
-- `open_multibuffer` opens excerpts from local files in one editor tab. Give each excerpt an absolute path and an inclusive line range. The tool groups excerpts from each file at that file's first position in the request.
+- `open_multibuffer` opens excerpts from local files in one editor tab. Give each excerpt an absolute path and an inclusive line range. The tool groups excerpts from each file at that file's first position in the request. Set `wait_for_close` to wait for the tab to close.
 - `open_draft` opens supplied Markdown in an editor tab. Close the tab to return the edited text to the caller.
 
-Each tool accepts `workspace_id`. Omit it to use the active local workspace. Use the workspace ID if miZed has multiple open workspaces and is out of focus.
+Set `focus_chat_on_close` to `true` on any of these three tools. The tool waits for the tab to close and returns its result. If the workspace is still displayed, the tool also focuses its Agent Panel.
+
+#### Switch workspaces and Git targets
+
+- Run `list_workspaces` to get workspace IDs and root paths. Pass a `workspace_id` to `switch_workspace`.
+- Run `list_repositories` to get Git worktree paths. Pass a `path` to `switch_repository` to select that repository.
+- Run `list_branches` for the selected repository. Pass a `branch` to `switch_branch` to check out an existing local branch. Git can reject a switch that conflicts with local changes.
+
+The workspace-scoped tools use the active local workspace by default. Pass `workspace_id` to target a specific workspace. `switch_workspace` requires the ID.
 
 #### Run MCP tools from a shell task
 

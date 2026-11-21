@@ -22,6 +22,9 @@ pub(super) struct ReadComment;
 #[derive(Clone)]
 pub(super) struct ListComments;
 
+#[derive(Clone)]
+pub(super) struct ClearComments;
+
 #[derive(Deserialize, JsonSchema)]
 struct CommentStoreTarget {
     #[serde(flatten)]
@@ -76,6 +79,15 @@ pub(super) struct ListCommentsInput {
     path: Option<String>,
 }
 
+/// Delete open and done comments in a named miZed workspace store.
+#[derive(Deserialize, JsonSchema)]
+pub(super) struct ClearCommentsInput {
+    #[serde(flatten)]
+    store: CommentStoreTarget,
+    /// Absolute file path to clear. Omit to clear the whole store.
+    path: Option<String>,
+}
+
 #[derive(Serialize, JsonSchema)]
 pub(super) struct CommentResult {
     path: String,
@@ -85,6 +97,11 @@ pub(super) struct CommentResult {
 #[derive(Serialize, JsonSchema)]
 pub(super) struct CommentList {
     comments: Vec<CommentResult>,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub(super) struct ClearedComments {
+    cleared: usize,
 }
 
 impl McpServerTool for AddComment {
@@ -185,6 +202,37 @@ impl McpServerTool for ListComments {
                 .collect::<Result<Vec<_>>>()
         })?;
         mcp_response(CommentList { comments })
+    }
+}
+
+impl McpServerTool for ClearComments {
+    type Input = ClearCommentsInput;
+    type Output = ClearedComments;
+    const NAME: &'static str = "clear_comments";
+
+    fn annotations(&self) -> ToolAnnotations {
+        ToolAnnotations {
+            destructive_hint: Some(true),
+            idempotent_hint: Some(true),
+            ..comment_annotations(false)
+        }
+    }
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> Result<ToolResponse<Self::Output>> {
+        if let Some(path) = &input.path {
+            check_comment_path(path)?;
+        }
+        let store = open_comment_store(input.store, cx).await?;
+        let save = store.update(cx, |store, cx| {
+            store.clear_comments(input.path.as_deref(), cx)
+        });
+        mcp_response(ClearedComments {
+            cleared: save.await?,
+        })
     }
 }
 

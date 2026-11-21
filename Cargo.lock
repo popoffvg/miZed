@@ -11118,15 +11118,22 @@ dependencies = [
  "anyhow",
  "context_server",
  "editor",
+ "fs",
  "futures 0.3.34",
  "gpui",
  "language",
  "line_comments",
+ "project",
+ "remote_connection",
  "schemars 1.0.4",
  "serde",
  "serde_json",
+ "settings",
  "tempfile",
+ "theme",
+ "theme_settings",
  "workspace",
+ "zed_actions",
 ]
 
 [[package]]

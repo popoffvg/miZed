@@ -9,12 +9,13 @@ use editor::{Editor, MultiBuffer, PathKey};
 use futures::{StreamExt as _, channel::oneshot, stream};
 use gpui::{
     App, AppContext as _, AsyncApp, Context, Entity, EntityId, EventEmitter, FocusHandle,
-    Focusable, IntoElement, Render, SharedString, Window,
+    Focusable, IntoElement, Render, SharedString, Window, WindowHandle,
 };
 use language::{Buffer, Point};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use workspace::{OpenOptions, Workspace, item::Item};
+use workspace::{MultiWorkspace, OpenOptions, Workspace, item::Item};
+use zed_actions::assistant::FocusAgent;
 
 use super::{WorkspaceTarget, mcp_response, mized_workspace};
 
@@ -33,8 +34,8 @@ pub(super) struct OpenFileInput {
     #[serde(flatten)]
     workspace: WorkspaceTarget,
     path: PathBuf,
-    /// Wait until the user closes the file tab.
-    wait_for_close: Option<bool>,
+    #[serde(flatten)]
+    close: TabCloseOptions,
 }
 
 /// Open Markdown text in miZed and return the edited text when the user closes the tab.
@@ -44,6 +45,8 @@ pub(super) struct OpenDraftInput {
     workspace: WorkspaceTarget,
     title: String,
     text: String,
+    #[serde(flatten)]
+    focus: ChatFocusOnClose,
 }
 
 /// Open excerpts in one miZed editor tab. Group excerpts from the same file.
@@ -53,6 +56,29 @@ pub(super) struct OpenMultibufferInput {
     workspace: WorkspaceTarget,
     title: String,
     excerpts: Vec<MultibufferExcerpt>,
+    #[serde(flatten)]
+    close: TabCloseOptions,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct ChatFocusOnClose {
+    /// Focus the Agent Panel when the tab closes. This also makes the tool wait.
+    #[serde(default)]
+    focus_chat_on_close: bool,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct TabCloseOptions {
+    /// Wait until the user closes the tab.
+    wait_for_close: Option<bool>,
+    #[serde(flatten)]
+    focus: ChatFocusOnClose,
+}
+
+impl TabCloseOptions {
+    fn should_wait(&self) -> bool {
+        self.wait_for_close == Some(true) || self.focus.focus_chat_on_close
+    }
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -110,10 +136,10 @@ impl McpServerTool for OpenFile {
             })
         })?;
         let item = task.await?;
-        if input.wait_for_close == Some(true) {
+        if input.close.should_wait() {
             let item_id = item.item_id();
             drop(item);
-            wait_for_tab_close(workspace, item_id, cx).await?;
+            wait_for_tab_close(window, workspace, item_id, input.close.focus, cx).await?;
         }
         mcp_response(OpenedFile { path: input.path })
     }
@@ -212,7 +238,7 @@ impl McpServerTool for OpenMultibuffer {
         }
 
         let title = input.title;
-        let excerpt_count = window.update(cx, |root, window, cx| {
+        let (item_id, excerpt_count) = window.update(cx, |root, window, cx| {
             root.activate(workspace.clone(), None, window, cx);
             workspace.update(cx, |workspace, cx| {
                 let capability = project.read(cx).capability();
@@ -226,10 +252,14 @@ impl McpServerTool for OpenMultibuffer {
                 let excerpt_count = multibuffer.read(cx).snapshot(cx).excerpts().count();
                 let editor =
                     cx.new(|cx| Editor::for_multibuffer(multibuffer, Some(project), window, cx));
+                let item_id = editor.entity_id();
                 workspace.add_item_to_active_pane(Box::new(editor), None, true, window, cx);
-                excerpt_count
+                (item_id, excerpt_count)
             })
         })?;
+        if input.close.should_wait() {
+            wait_for_tab_close(window, workspace, item_id, input.close.focus, cx).await?;
+        }
         mcp_response(OpenedMultibuffer {
             title,
             excerpt_count,
@@ -275,15 +305,17 @@ impl McpServerTool for OpenDraft {
             });
             (item_id, buffer)
         })?;
-        wait_for_tab_close(workspace, item_id, cx).await?;
+        wait_for_tab_close(window, workspace, item_id, input.focus, cx).await?;
         let text = buffer.read_with(cx, |buffer, _| buffer.text());
         mcp_response(EditedDraft { text })
     }
 }
 
 async fn wait_for_tab_close(
+    window: WindowHandle<MultiWorkspace>,
     workspace: Entity<Workspace>,
     item_id: EntityId,
+    focus: ChatFocusOnClose,
     cx: &mut AsyncApp,
 ) -> Result<()> {
     let (sender, receiver) = oneshot::channel();
@@ -301,11 +333,24 @@ async fn wait_for_tab_close(
             }
         }))
     });
+    let workspace_id = workspace.entity_id();
     drop(workspace);
     if let Some(_subscription) = subscription {
         receiver
             .await
             .context("miZed dropped the workspace before the tab closed")?;
+    }
+    if focus.focus_chat_on_close {
+        cx.update(|cx| {
+            if window.read(cx).is_ok() {
+                window.update(cx, |root, window, cx| {
+                    if root.workspace().entity_id() == workspace_id {
+                        window.dispatch_action(Box::new(FocusAgent), cx);
+                    }
+                })?;
+            }
+            anyhow::Ok(())
+        })?;
     }
     Ok(())
 }

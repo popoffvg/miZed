@@ -28,10 +28,15 @@ struct CommentSave {
     store: Entity<CommentStore>,
     revision: u64,
     change: CommentChange,
-    reply: oneshot::Sender<anyhow::Result<()>>,
+    reply: oneshot::Sender<anyhow::Result<usize>>,
 }
 
-struct CommentChange {
+enum CommentChange {
+    Edit(CommentEdit),
+    Clear { path: Option<String> },
+}
+
+struct CommentEdit {
     path: String,
     line: u32,
     previous: Option<LineComment>,
@@ -116,7 +121,7 @@ impl CommentStore {
                         match write_comment_change(fs.as_ref(), &path, change, recreate_folder)
                             .await
                         {
-                            Ok(files) => (Ok(()), Some(files)),
+                            Ok((files, cleared)) => (Ok(cleared), Some(files)),
                             Err(error) => (Err(error), load_store(fs.as_ref(), &path).await.ok()),
                         }
                     })
@@ -234,6 +239,26 @@ impl CommentStore {
         self.save_change(path, line, previous, None, cx)
     }
 
+    /// Clear comments in one file or in the entire store.
+    pub fn clear_comments(
+        &mut self,
+        path: Option<&str>,
+        cx: &mut Context<Self>,
+    ) -> Task<anyhow::Result<usize>> {
+        if path.is_some_and(|path| !Path::new(path).is_absolute()) {
+            return Task::ready(Err(anyhow::anyhow!(
+                "Clear line comments with an absolute file path"
+            )));
+        }
+        self.save(
+            CommentChange::Clear {
+                path: path.map(str::to_owned),
+            },
+            |cleared| cleared,
+            cx,
+        )
+    }
+
     fn save_change(
         &mut self,
         path: &str,
@@ -247,19 +272,32 @@ impl CommentStore {
                 "Save line comments with an absolute file path"
             )));
         }
-        self.revision += 1;
+        self.save(
+            CommentChange::Edit(CommentEdit {
+                path: path.to_owned(),
+                line,
+                previous,
+                replacement,
+            }),
+            |_| (),
+            cx,
+        )
+    }
+
+    fn save<T: 'static>(
+        &mut self,
+        change: CommentChange,
+        output: impl FnOnce(usize) -> T + 'static,
+        cx: &mut Context<Self>,
+    ) -> Task<anyhow::Result<T>> {
+        let revision = self.revision + 1;
         let (reply, result) = oneshot::channel();
         if self
             .saves
             .try_send(CommentSave {
                 store: cx.entity(),
-                revision: self.revision,
-                change: CommentChange {
-                    path: path.to_string(),
-                    line,
-                    previous,
-                    replacement,
-                },
+                revision,
+                change,
                 reply,
             })
             .is_err()
@@ -268,10 +306,12 @@ impl CommentStore {
                 "The line comment save queue is closed"
             )));
         }
+        self.revision = revision;
         cx.spawn(async move |_, _| {
-            result
+            let cleared = result
                 .await
-                .context("The line comment save did not complete")?
+                .context("The line comment save did not complete")??;
+            Ok(output(cleared))
         })
     }
 }
@@ -281,11 +321,43 @@ async fn write_comment_change(
     path: &Path,
     change: CommentChange,
     recreate_folder: bool,
-) -> anyhow::Result<BTreeMap<String, Vec<LineComment>>> {
+) -> anyhow::Result<(BTreeMap<String, Vec<LineComment>>, usize)> {
     if recreate_folder && let Some(folder) = path.parent() {
         fs.create_dir(folder).await?;
     }
     let mut files = load_store(fs, path).await?;
+    let cleared = match change {
+        CommentChange::Edit(edit) => {
+            apply_comment_edit(&mut files, edit)?;
+            0
+        }
+        CommentChange::Clear { path } => {
+            let cleared = if let Some(path) = path {
+                files.remove(&path).map_or(0, |comments| comments.len())
+            } else {
+                let cleared = files.values().map(Vec::len).sum();
+                files.clear();
+                cleared
+            };
+            if cleared == 0 {
+                return Ok((files, cleared));
+            }
+            cleared
+        }
+    };
+    let store_file = StoreFile {
+        version: STORE_VERSION,
+        files,
+    };
+    let text = serde_json::to_string_pretty(&store_file)?;
+    fs.atomic_write(path.to_path_buf(), text).await?;
+    Ok((store_file.files, cleared))
+}
+
+fn apply_comment_edit(
+    files: &mut BTreeMap<String, Vec<LineComment>>,
+    change: CommentEdit,
+) -> anyhow::Result<()> {
     let comments = files.entry(change.path.clone()).or_default();
     let current = comments.iter().find(|comment| comment.line == change.line);
     anyhow::ensure!(
@@ -300,13 +372,7 @@ async fn write_comment_change(
     if comments.is_empty() {
         files.remove(&change.path);
     }
-    let store_file = StoreFile {
-        version: STORE_VERSION,
-        files,
-    };
-    let text = serde_json::to_string_pretty(&store_file)?;
-    fs.atomic_write(path.to_path_buf(), text).await?;
-    Ok(store_file.files)
+    Ok(())
 }
 
 async fn watch_store(

@@ -1,5 +1,8 @@
 mod comment_tools;
 mod file_handoff;
+#[cfg(test)]
+mod mized_server_tests;
+mod workspace_switch;
 
 use std::{io::Write as _, path::Path};
 
@@ -69,9 +72,16 @@ pub(super) fn start_mized_server(cx: &mut App) {
         server.add_tool(comment_tools::AddComment);
         server.add_tool(comment_tools::ReadComment);
         server.add_tool(comment_tools::ListComments);
+        server.add_tool(comment_tools::ClearComments);
         server.add_tool(file_handoff::OpenFile);
         server.add_tool(file_handoff::OpenMultibuffer);
         server.add_tool(file_handoff::OpenDraft);
+        server.add_tool(workspace_switch::ListWorkspaces);
+        server.add_tool(workspace_switch::SwitchWorkspace);
+        server.add_tool(workspace_switch::ListRepositories);
+        server.add_tool(workspace_switch::SwitchRepository);
+        server.add_tool(workspace_switch::ListBranches);
+        server.add_tool(workspace_switch::SwitchBranch);
 
         let socket_path = server.socket_path().to_owned();
         cx.background_spawn(
@@ -114,17 +124,9 @@ fn mized_workspace(
         return Ok((window, root.workspace().clone()));
     }
 
-    let mut candidates = cx
-        .windows()
-        .into_iter()
-        .filter_map(|window| window.downcast::<MultiWorkspace>())
-        .filter_map(|window| window.read(cx).ok().map(|root| (window, root)))
-        .flat_map(|(window, root)| root.workspaces().map(move |workspace| (window, workspace)))
-        .filter(|(_, workspace)| {
-            let workspace = workspace.read(cx);
-            workspace.project().read(cx).is_local()
-                && workspace_id.is_none_or(|id| workspace.database_id().map(i64::from) == Some(id))
-        });
+    let mut candidates = local_workspaces(cx).filter(|(_, workspace)| {
+        workspace_id.is_none_or(|id| workspace.read(cx).database_id().map(i64::from) == Some(id))
+    });
     let (window, workspace) = candidates
         .next()
         .context("No matching local miZed workspace is open")?;
@@ -133,6 +135,17 @@ fn mized_workspace(
         "Select a miZed workspace with workspace_id"
     );
     Ok((window, workspace.clone()))
+}
+
+fn local_workspaces(
+    cx: &App,
+) -> impl Iterator<Item = (WindowHandle<MultiWorkspace>, &Entity<Workspace>)> {
+    cx.windows()
+        .into_iter()
+        .filter_map(|window| window.downcast::<MultiWorkspace>())
+        .filter_map(|window| window.read(cx).ok().map(|root| (window, root)))
+        .flat_map(|(window, root)| root.workspaces().map(move |workspace| (window, workspace)))
+        .filter(|(_, workspace)| workspace.read(cx).project().read(cx).is_local())
 }
 
 fn mcp_response<T: Serialize>(value: T) -> Result<ToolResponse<T>> {
