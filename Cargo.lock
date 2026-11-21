@@ -7071,7 +7071,6 @@ dependencies = [
  "language",
  "language_model",
  "language_model_selector",
- "line_comments",
  "log",
  "markdown",
  "menu",
@@ -10001,14 +10000,20 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-channel 2.5.0",
+ "clap",
  "collections",
  "editor",
+ "file_icons",
  "fs",
  "futures 0.3.34",
+ "fuzzy_nucleo",
+ "git_ui",
  "gpui",
  "language",
  "multi_buffer",
  "paths",
+ "picker",
+ "picker_preview",
  "project",
  "serde",
  "serde_json",
@@ -11104,6 +11109,24 @@ dependencies = [
  "serde",
  "serde_json",
  "strum 0.28.0",
+]
+
+[[package]]
+name = "mized_mcp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "context_server",
+ "editor",
+ "futures 0.3.34",
+ "gpui",
+ "language",
+ "line_comments",
+ "schemars 1.0.4",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "workspace",
 ]
 
 [[package]]
@@ -22651,6 +22674,7 @@ dependencies = [
  "migrator",
  "mimalloc",
  "miniprofiler_ui",
+ "mized_mcp",
  "nix 0.30.1",
  "node_runtime",
  "notifications",

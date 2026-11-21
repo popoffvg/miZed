@@ -12,17 +12,27 @@ workspace = true
 path = "src/line_comments.rs"
 doctest = false
 
+[[bin]]
+name = "list-line-comments"
+path = "src/list_line_comments.rs"
+
 [dependencies]
 anyhow.workspace = true
 async-channel.workspace = true
+clap.workspace = true
 collections.workspace = true
 editor.workspace = true
+file_icons.workspace = true
 fs.workspace = true
 futures.workspace = true
+fuzzy_nucleo.workspace = true
+git_ui.workspace = true
 gpui.workspace = true
 language.workspace = true
 multi_buffer.workspace = true
 paths.workspace = true
+picker.workspace = true
+picker_preview.workspace = true
 project.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -33,6 +43,7 @@ workspace.workspace = true
 [dev-dependencies]
 editor = { workspace = true, features = ["test-support"] }
 fs = { workspace = true, features = ["test-support"] }
+git_ui = { workspace = true, features = ["test-support"] }
 gpui = { workspace = true, features = ["test-support"] }
 project = { workspace = true, features = ["test-support"] }
 settings = { workspace = true, features = ["test-support"] }

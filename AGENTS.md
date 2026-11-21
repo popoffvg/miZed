@@ -1,3 +1,11 @@
+# miZed fork changes
+
+* Minimize changes to upstream Zed files so miZed can update from upstream with fewer conflicts.
+* Extend Zed through existing extension points and public APIs first.
+* Keep miZed feature logic and its tests in miZed-owned crates. Keep line-comment behavior in `crates/line_comments`.
+* If an extension needs a change in an upstream crate, add the smallest hook that delegates to miZed-owned code.
+* Review each changed upstream file in the diff. Keep each change only if the feature requires it.
+
 # Rust coding guidelines
 
 * Prioritize code correctness and clarity. Speed and efficiency are secondary priorities unless otherwise specified.

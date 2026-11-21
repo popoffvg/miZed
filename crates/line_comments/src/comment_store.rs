@@ -9,15 +9,17 @@ use serde::{Deserialize, Serialize};
 use util::ResultExt as _;
 use workspace::WorkspaceId;
 
+use crate::comment_store_path::{CommentStoreName, line_comment_store_path};
+
 const STORE_VERSION: u32 = 1;
 const STORE_WATCH_LATENCY: Duration = Duration::from_millis(100);
 
-/// The line comments of one workspace, kept in `<Zed data dir>/line_comments/<workspace id>.json`
-/// and keyed by the absolute path of each file. Claude reads and writes the same file.
+/// Comments in one named store, keyed by absolute file path.
 pub struct CommentStore {
     path: PathBuf,
     fs: Arc<dyn Fs>,
     files: BTreeMap<String, Vec<LineComment>>,
+    loaded: bool,
     _watch: Task<()>,
 }
 
@@ -29,6 +31,8 @@ pub struct LineComment {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub end_line: Option<u32>,
     pub text: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub done: bool,
     #[serde(default)]
     pub orphaned: bool,
     #[serde(default)]
@@ -50,7 +54,7 @@ struct StoreFile {
 }
 
 #[derive(Default)]
-struct CommentStores(HashMap<WorkspaceId, WeakEntity<CommentStore>>);
+struct CommentStores(HashMap<(WorkspaceId, CommentStoreName), WeakEntity<CommentStore>>);
 
 impl Global for CommentStores {}
 
@@ -61,38 +65,49 @@ impl LineComment {
 }
 
 impl CommentStore {
-    /// The store of a workspace. Editors of one workspace share one store and one watch.
-    pub fn for_workspace(
+    /// Editors that select the same workspace and name share one store and watch.
+    pub fn workspace_comment_store(
         workspace_id: WorkspaceId,
+        name: CommentStoreName,
         fs: Arc<dyn Fs>,
         cx: &mut App,
     ) -> Entity<CommentStore> {
+        let key = (workspace_id, name);
         if let Some(store) = cx
             .default_global::<CommentStores>()
             .0
-            .get(&workspace_id)
+            .get(&key)
             .and_then(WeakEntity::upgrade)
         {
             return store;
         }
-        let path = paths::data_dir()
-            .join("line_comments")
-            .join(format!("{}.json", i64::from(workspace_id)));
+        let path = line_comment_store_path(workspace_id.into(), &key.1);
         let store = cx.new(|cx| CommentStore {
             path: path.clone(),
             fs: fs.clone(),
             files: BTreeMap::new(),
+            loaded: false,
             _watch: cx.spawn(async move |store, cx| watch_store(store, path, fs, cx).await),
         });
         cx.default_global::<CommentStores>()
             .0
-            .insert(workspace_id, store.downgrade());
+            .insert(key, store.downgrade());
         store
     }
 
     /// The comments of one file, by its absolute path.
     pub fn comments(&self, path: &str) -> &[LineComment] {
         self.files.get(path).map(Vec::as_slice).unwrap_or_default()
+    }
+
+    pub fn all_comments(&self) -> impl Iterator<Item = (&str, &LineComment)> {
+        self.files.iter().flat_map(|(path, comments)| {
+            comments.iter().map(move |comment| (path.as_str(), comment))
+        })
+    }
+
+    pub fn is_loaded(&self) -> bool {
+        self.loaded
     }
 
     /// Replace the comment that starts on the same line, or add it, and save the store.
@@ -109,8 +124,34 @@ impl CommentStore {
         self.save(cx)
     }
 
+    pub(crate) fn set_comment_done(
+        &mut self,
+        path: &str,
+        line: u32,
+        done: bool,
+        cx: &mut Context<Self>,
+    ) -> Task<anyhow::Result<()>> {
+        let Some(comment) = self
+            .files
+            .get_mut(path)
+            .and_then(|comments| comments.iter_mut().find(|comment| comment.line == line))
+        else {
+            return Task::ready(Err(anyhow::anyhow!("The line comment no longer exists")));
+        };
+        if comment.done == done {
+            return Task::ready(Ok(()));
+        }
+        comment.done = done;
+        self.save(cx)
+    }
+
     /// Remove the comment that starts on this line, and save the store.
-    pub fn remove(&mut self, path: &str, line: u32, cx: &mut Context<Self>) -> Task<anyhow::Result<()>> {
+    pub fn remove(
+        &mut self,
+        path: &str,
+        line: u32,
+        cx: &mut Context<Self>,
+    ) -> Task<anyhow::Result<()>> {
         if let Some(comments) = self.files.get_mut(path) {
             comments.retain(|comment| comment.line != line);
             if comments.is_empty() {
@@ -149,13 +190,13 @@ async fn watch_store(
     fs.create_dir(folder).await.log_err();
     let (mut events, _watcher) = fs.watch(folder, STORE_WATCH_LATENCY).await;
     loop {
-        let files = load_store(fs.as_ref(), &path)
-            .await
-            .log_err()
-            .unwrap_or_default();
+        let files = load_store(fs.as_ref(), &path).await.log_err();
         if store
             .update(cx, |store, cx| {
-                store.files = files;
+                store.loaded = files.is_some();
+                if let Some(files) = files {
+                    store.files = files;
+                }
                 cx.notify();
             })
             .is_err()
@@ -177,8 +218,10 @@ async fn load_store(
     fs: &dyn Fs,
     path: &Path,
 ) -> anyhow::Result<BTreeMap<String, Vec<LineComment>>> {
-    let Ok(text) = fs.load(path).await else {
-        return Ok(BTreeMap::new());
+    let text = match fs.load(path).await {
+        Ok(text) => text,
+        Err(_) if fs.metadata(path).await?.is_none() => return Ok(BTreeMap::new()),
+        Err(error) => return Err(error),
     };
     if text.trim().is_empty() {
         return Ok(BTreeMap::new());

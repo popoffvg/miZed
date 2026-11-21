@@ -50,7 +50,7 @@ pub struct SoloDiffView {
 }
 
 impl SoloDiffView {
-    pub(crate) fn diff_editor(&self) -> &Entity<SplittableEditor> {
+    pub fn diff_editor(&self) -> &Entity<SplittableEditor> {
         &self.editor
     }
 

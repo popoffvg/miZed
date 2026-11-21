@@ -5,7 +5,7 @@ use chrono::DateTime;
 use collections::HashMap;
 use project::WorktreePaths;
 use serde::Deserialize;
-use workspace::PathList;
+use workspace::{PathList, WorkspaceId};
 
 use crate::{TerminalId, terminal_thread_metadata_store::TerminalThreadMetadata};
 
@@ -129,6 +129,7 @@ pub(crate) async fn close_thread(address: &str) -> anyhow::Result<()> {
 
 pub(crate) async fn attach_program(
     id: TerminalId,
+    workspace_id: Option<WorkspaceId>,
     existing: Option<&str>,
     restore: bool,
     directory: Option<&Path>,
@@ -171,7 +172,11 @@ pub(crate) async fn attach_program(
                 .as_str()
                 .context("Herdr Desktop did not return a terminal address")?,
         )?;
-        desktop_command("hc", &["label", address, &format!("zed.thread={id}")]).await?;
+        let thread_label = format!("zed.thread={id}");
+        let workspace_label = workspace_id.map(|id| format!("zed.workspace_id={}", i64::from(id)));
+        let mut labels = vec!["label", address, &thread_label];
+        labels.extend(workspace_label.as_deref());
+        desktop_command("hc", &labels).await?;
         address.to_owned()
     };
     Ok(task::Shell::WithArguments {

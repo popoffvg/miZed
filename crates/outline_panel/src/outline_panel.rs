@@ -5625,7 +5625,7 @@ impl Panel for OutlinePanel {
     fn icon(&self, _: &Window, cx: &App) -> Option<IconName> {
         OutlinePanelSettings::get_global(cx)
             .button
-            .then_some(IconName::ListTree)
+            .then_some(IconName::Outline)
     }
 
     fn icon_tooltip(&self, _window: &Window, _: &App) -> Option<&'static str> {

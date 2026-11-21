@@ -54,7 +54,11 @@ type RequestHandler = Box<dyn Fn(RequestId, Option<Box<RawValue>>, &App) -> Task
 impl McpServer {
     pub fn new(cx: &AsyncApp) -> Task<Result<Self>> {
         let task = cx.background_spawn(async move {
-            let temp_dir = tempfile::Builder::new().prefix("zed-mcp").tempdir()?;
+            let mut socket_folder = tempfile::Builder::new();
+            socket_folder.prefix("zed-mcp");
+            #[cfg(unix)]
+            socket_folder.permissions(std::os::unix::fs::PermissionsExt::from_mode(0o700));
+            let temp_dir = socket_folder.tempdir()?;
             let socket_path = temp_dir.path().join("mcp.sock");
             let listener = UnixListener::bind(&socket_path).context("creating mcp socket")?;
 
@@ -117,7 +121,8 @@ impl McpServer {
                 move |input_value, cx| {
                     let input = match input_value {
                         Some(input) => serde_json::from_value(input),
-                        None => serde_json::from_value(serde_json::Value::Null),
+                        None => serde_json::from_value(json!({}))
+                            .or_else(|_| serde_json::from_value(serde_json::Value::Null)),
                     };
 
                     let tool = tool.clone();

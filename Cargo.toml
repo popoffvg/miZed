@@ -150,6 +150,7 @@ members = [
     "crates/migrator",
     "crates/miniprofiler_ui",
     "crates/mistral",
+    "crates/mized_mcp",
     "crates/multi_buffer",
     "crates/net",
     "crates/node_runtime",
@@ -429,6 +430,7 @@ mermaid_render = { path = "crates/mermaid_render" }
 migrator = { path = "crates/migrator" }
 miniprofiler_ui = { path = "crates/miniprofiler_ui" }
 mistral = { path = "crates/mistral" }
+mized_mcp = { path = "crates/mized_mcp" }
 multi_buffer = { path = "crates/multi_buffer" }
 net = { path = "crates/net" }
 node_runtime = { path = "crates/node_runtime" }

@@ -810,7 +810,8 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
             initialize_agent_panel(workspace_handle.clone(), cx.clone()).map(|r| r.log_err()),
         );
 
-        workspace_handle.update(cx, |workspace, cx| {
+        workspace_handle.update_in(cx, |workspace, window, cx| {
+            line_comments::add_line_comments_panel(workspace, window, cx);
             workspace.finish_dock_restoration(cx);
         })?;
 

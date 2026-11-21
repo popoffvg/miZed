@@ -6,13 +6,17 @@ use editor::{Anchor, AnchorRangeExt, Editor, scroll::Autoscroll};
 use editor::{MultiBufferOffset, RowHighlightOptions, SelectionEffects};
 use fuzzy_nucleo::StringMatch;
 use gpui::{
-    App, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, HighlightStyle,
-    ParentElement, Point, Rems, Render, Styled, StyledText, Task, WeakEntity, Window, div, rems,
+    AnyElement, App, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Global,
+    HighlightStyle, ParentElement, Point, Rems, Render, Styled, StyledText, Task, WeakEntity,
+    Window, div, rems,
 };
 use language::{OffsetRangeExt, Outline, OutlineItem, OutlineSearchEntry};
 use picker::{MatchLocation, Picker, PickerDelegate, PreviewUpdate};
 use theme::ActiveTheme;
-use ui::{ListItem, ListItemSpacing, prelude::*, utils::buffer_text_style};
+use ui::{
+    ContextMenu, ContextMenuEntry, IconPosition, ListItem, ListItemSpacing, PopoverMenu,
+    PopoverMenuHandle, Tooltip, prelude::*, utils::buffer_text_style,
+};
 use workspace::{DismissDecision, ModalView};
 
 pub fn init(cx: &mut App) {
@@ -40,7 +44,7 @@ pub fn toggle(
     if workspace.read(cx).active_modal::<OutlineView>(cx).is_some() {
         workspace.update(cx, |workspace, cx| {
             workspace.toggle_modal(window, cx, |window, cx| {
-                OutlineView::new(Outline::new(Vec::new()), editor.clone(), window, cx)
+                OutlineView::new(Vec::new(), editor.clone(), window, cx)
             });
         });
         return;
@@ -57,10 +61,9 @@ pub fn toggle(
                 return;
             }
             cx.update(|window, cx| {
-                let outline = Outline::new(items);
                 workspace.update(cx, |workspace, cx| {
                     workspace.toggle_modal(window, cx, |window, cx| {
-                        OutlineView::new(outline, editor, window, cx)
+                        OutlineView::new(items, editor, window, cx)
                     });
                 });
             })
@@ -116,6 +119,20 @@ pub struct OutlineView {
     picker: Entity<Picker<OutlineViewDelegate>>,
 }
 
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum OutlineLayout {
+    #[default]
+    Grouped,
+    Flat,
+}
+
+impl OutlineLayout {
+    const OPTIONS: [(Self, &'static str); 2] =
+        [(Self::Grouped, "Grouped"), (Self::Flat, "Flat List")];
+}
+
+impl Global for OutlineLayout {}
+
 impl Focusable for OutlineView {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
         self.picker.focus_handle(cx)
@@ -167,14 +184,14 @@ impl OutlineView {
     }
 
     fn new(
-        outline: Outline<Anchor>,
+        symbols: Vec<OutlineItem<Anchor>>,
         editor: Entity<Editor>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> OutlineView {
         let project = editor.read(cx).project().cloned();
-        let delegate = OutlineViewDelegate::new(cx.entity().downgrade(), outline, editor, cx);
-        let picker = cx.new(|cx| {
+        let delegate = OutlineViewDelegate::new(cx.entity().downgrade(), symbols, editor, cx);
+        let picker = cx.new(|cx: &mut Context<Picker<OutlineViewDelegate>>| {
             let picker = if let Some(project) = project {
                 let preview = picker_preview::editor_preview(project, window, cx);
                 Picker::uniform_list_with_preview(delegate, preview, window, cx)
@@ -195,7 +212,10 @@ impl OutlineView {
 struct OutlineViewDelegate {
     outline_view: WeakEntity<OutlineView>,
     active_editor: Entity<Editor>,
+    symbols: Arc<Outline<Anchor>>,
     outline: Arc<Outline<Anchor>>,
+    layout: OutlineLayout,
+    view_options_menu: PopoverMenuHandle<ContextMenu>,
     selected_match_index: usize,
     prev_scroll_position: Option<Point<ScrollOffset>>,
     matches: Vec<OutlineSearchEntry>,
@@ -206,19 +226,51 @@ enum OutlineRowHighlights {}
 impl OutlineViewDelegate {
     fn new(
         outline_view: WeakEntity<OutlineView>,
-        outline: Outline<Anchor>,
+        symbols: Vec<OutlineItem<Anchor>>,
         editor: Entity<Editor>,
-
         cx: &mut Context<OutlineView>,
     ) -> Self {
+        let layout = *cx.default_global::<OutlineLayout>();
+        let symbols = Arc::new(Outline::new(symbols));
+        let outline = Self::symbol_outline(&symbols, layout);
         Self {
             outline_view,
             matches: Default::default(),
             selected_match_index: 0,
             prev_scroll_position: Some(editor.update(cx, |editor, cx| editor.scroll_position(cx))),
             active_editor: editor,
-            outline: Arc::new(outline),
+            symbols,
+            outline,
+            layout,
+            view_options_menu: PopoverMenuHandle::default(),
         }
+    }
+
+    fn symbol_outline(
+        symbols: &Arc<Outline<Anchor>>,
+        layout: OutlineLayout,
+    ) -> Arc<Outline<Anchor>> {
+        if layout == OutlineLayout::Grouped {
+            return symbols.clone();
+        }
+        let mut items = symbols.items.clone();
+        for item in &mut items {
+            item.depth = 0;
+        }
+        Arc::new(Outline::new(items))
+    }
+
+    fn refresh_outline(
+        picker: &mut Picker<Self>,
+        window: &mut Window,
+        cx: &mut Context<Picker<Self>>,
+    ) {
+        let delegate = &mut picker.delegate;
+        delegate.restore_active_editor(window, cx);
+        delegate.outline = Self::symbol_outline(&delegate.symbols, delegate.layout);
+        delegate.matches.clear();
+        delegate.selected_match_index = 0;
+        picker.refresh(window, cx);
     }
 
     fn restore_active_editor(&mut self, window: &mut Window, cx: &mut App) {
@@ -405,6 +457,9 @@ impl PickerDelegate for OutlineViewDelegate {
         window: &mut Window,
         cx: &mut Context<Picker<OutlineViewDelegate>>,
     ) {
+        if !self.can_select(self.selected_match_index, window, cx) {
+            return;
+        }
         self.prev_scroll_position.take();
         self.set_selected_index(self.selected_match_index, true, cx);
 
@@ -457,6 +512,55 @@ impl PickerDelegate for OutlineViewDelegate {
                         .child(render_item(outline_item, ranges, cx)),
                 ),
         )
+    }
+
+    fn has_another_open_menu(&self, window: &Window, cx: &App) -> bool {
+        self.view_options_menu.is_deployed() || self.view_options_menu.is_focused(window, cx)
+    }
+
+    fn searchbar_trailer(
+        &self,
+        _: &mut Window,
+        cx: &mut Context<Picker<Self>>,
+    ) -> Option<AnyElement> {
+        let picker = cx.weak_entity();
+        let layout = self.layout;
+        let settings = PopoverMenu::new("outline-view-options")
+            .with_handle(self.view_options_menu.clone())
+            .trigger_with_tooltip(
+                IconButton::new("outline-view-options-trigger", IconName::Filter)
+                    .icon_size(IconSize::Small),
+                Tooltip::text("View Options"),
+            )
+            .menu(move |window, cx| {
+                let picker = picker.clone();
+                Some(ContextMenu::build(window, cx, move |menu, _, _| {
+                    OutlineLayout::OPTIONS.iter().fold(
+                        menu.header("View"),
+                        |menu, &(option, label)| {
+                            let picker = picker.clone();
+                            menu.item(
+                                ContextMenuEntry::new(label)
+                                    .toggle(IconPosition::End, layout == option)
+                                    .handler(move |window, cx| {
+                                        picker
+                                            .update(cx, |picker, cx| {
+                                                if picker.delegate.layout != option {
+                                                    picker.delegate.layout = option;
+                                                    cx.set_global(option);
+                                                    Self::refresh_outline(picker, window, cx);
+                                                }
+                                                picker.focus(window, cx);
+                                            })
+                                            .ok();
+                                    }),
+                            )
+                        },
+                    )
+                }))
+            })
+            .anchor(gpui::Anchor::TopRight);
+        Some(settings.into_any_element())
     }
 }
 

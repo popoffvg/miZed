@@ -778,6 +778,7 @@ fn main() {
         encoding_selector::init(cx);
         language_selector::init(cx);
         line_comments::init(cx);
+        mized_mcp::start_mized_mcp(cx);
         line_ending_selector::init(cx);
         lsp_command_selector::init(cx);
         toolchain_selector::init(cx);

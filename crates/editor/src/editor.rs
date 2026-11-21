@@ -820,6 +820,16 @@ pub trait Addon: 'static {
         menu
     }
 
+    fn extend_gutter_context_menu(
+        &self,
+        menu: ui::ContextMenu,
+        _: &Editor,
+        _: Anchor,
+        _: &App,
+    ) -> ui::ContextMenu {
+        menu
+    }
+
     fn override_status_for_buffer_id(&self, _: BufferId, _: &App) -> Option<FileStatus> {
         None
     }
@@ -4553,11 +4563,13 @@ impl Editor {
                 }
             });
 
+        let gutter_anchor = anchor;
         let (anchor, breakpoint) =
             breakpoint.unwrap_or_else(|| (anchor, Arc::new(Breakpoint::new_standard())));
 
-        ContextMenu::build(window, cx, |menu, _, _cx| {
-            menu.on_blur_subscription(Subscription::new(|| {}))
+        ContextMenu::build(window, cx, |menu, _, cx| {
+            let mut menu = menu
+                .on_blur_subscription(Subscription::new(|| {}))
                 .context(focus_handle)
                 .when_some(
                     clear_runnable_task_status,
@@ -4728,7 +4740,11 @@ impl Editor {
                                 .log_err();
                         },
                     )
-                })
+                });
+            for addon in self.addons.values() {
+                menu = addon.extend_gutter_context_menu(menu, self, gutter_anchor, cx);
+            }
+            menu
         })
     }
 
@@ -8983,8 +8999,45 @@ impl Editor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.show_inline_prompt(anchor, (placeholder, value), false, sender, window, cx);
+    }
+
+    pub fn show_inline_multiline_prompt(
+        &mut self,
+        anchor: Anchor,
+        placeholder: &str,
+        value: &str,
+        sender: project::lsp_store::InlineInputResponder,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.show_inline_prompt(anchor, (placeholder, value), true, sender, window, cx);
+    }
+
+    fn show_inline_prompt(
+        &mut self,
+        anchor: Anchor,
+        text: (&str, &str),
+        multiline: bool,
+        sender: project::lsp_store::InlineInputResponder,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (placeholder, value) = text;
+        let height = if multiline { 6 } else { 3 };
+        let code_style = multiline.then(|| self.style(cx).text.clone());
         let input = cx.new(|cx| {
-            let mut input = Editor::auto_height(1, 3, window, cx);
+            let mut input = Editor::auto_height(1, height as usize, window, cx);
+            if let Some(style) = code_style {
+                input.set_text_style_refinement(TextStyleRefinement {
+                    font_family: Some(style.font_family),
+                    font_features: Some(style.font_features),
+                    font_fallbacks: style.font_fallbacks,
+                    font_size: Some(style.font_size),
+                    font_weight: Some(style.font_weight),
+                    ..Default::default()
+                });
+            }
             input.set_placeholder_text(placeholder, window, cx);
             input.set_text(value.to_owned(), window, cx);
             input
@@ -8994,7 +9047,7 @@ impl Editor {
         self.insert_blocks(
             [BlockProperties {
                 placement: BlockPlacement::Above(anchor),
-                height: Some(3),
+                height: Some(height),
                 style: BlockStyle::Sticky,
                 priority: 0,
                 render: Arc::new(move |cx| {
@@ -9021,13 +9074,27 @@ impl Editor {
                     ui::inline_prompt_frame(cx)
                         .block_mouse_except_scroll()
                         .px_2()
+                        .pr(cx.margins.right + px(9.))
+                        .when(multiline, |frame| frame.key_context("MultilineTextPrompt"))
                         .capture_action({
                             let finish = finish.clone();
                             move |_: &menu::Cancel, window, cx| finish(false, window, cx)
                         })
-                        .capture_action({
-                            let finish = finish.clone();
-                            move |_: &crate::actions::Newline, window, cx| finish(true, window, cx)
+                        .when(!multiline, |frame| {
+                            frame.capture_action({
+                                let finish = finish.clone();
+                                move |_: &crate::actions::Newline, window, cx| {
+                                    finish(true, window, cx)
+                                }
+                            })
+                        })
+                        .when(multiline, |frame| {
+                            frame.capture_action({
+                                let finish = finish.clone();
+                                move |_: &crate::actions::NewlineBelow, window, cx| {
+                                    finish(true, window, cx)
+                                }
+                            })
                         })
                         .child(
                             h_flex()
@@ -9039,10 +9106,22 @@ impl Editor {
                                             move |_, window, cx| finish(false, window, cx)
                                         }),
                                 )
-                                .child(div().flex_1().child(field.clone()))
+                                .child(div().flex_1().min_w_0().child(field.clone()))
                                 .child(
-                                    Button::new("submit-inline-input", "Submit")
-                                        .on_click(move |_, window, cx| finish(true, window, cx)),
+                                    div().flex_shrink_0().child(
+                                        Button::new("submit-inline-input", "Submit")
+                                            .label_size(LabelSize::Small)
+                                            .when(!multiline, |button| {
+                                                button.end_icon(
+                                                    Icon::new(IconName::Return)
+                                                        .size(IconSize::XSmall)
+                                                        .color(Color::Muted),
+                                                )
+                                            })
+                                            .on_click(move |_, window, cx| {
+                                                finish(true, window, cx)
+                                            }),
+                                    ),
                                 ),
                         )
                         .into_any_element()

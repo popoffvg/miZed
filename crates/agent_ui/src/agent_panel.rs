@@ -2115,6 +2115,7 @@ impl AgentPanel {
                 if let Some(name) = herdr_session {
                     let program = crate::herdr_sessions::attach_program(
                         terminal_id,
+                        workspace_id,
                         name.as_deref(),
                         created_at.is_some(),
                         terminal_working_directory.as_deref(),

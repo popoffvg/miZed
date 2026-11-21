@@ -48,7 +48,6 @@ use workspace::{
 };
 
 use crate::commit_tooltip::CommitAvatar;
-use line_comments::EditLineComment;
 use crate::git_panel::GitPanel;
 
 actions!(
@@ -63,7 +62,6 @@ actions!(
 
 pub fn init(cx: &mut App) {
     cx.observe_new(|workspace: &mut Workspace, _window, _cx| {
-        workspace.register_action(edit_line_comment);
         workspace.register_action(|workspace, _: &ApplyCurrentStash, window, cx| {
             CommitView::apply_stash(workspace, window, cx);
         });
@@ -75,109 +73,6 @@ pub fn init(cx: &mut App) {
         });
     })
     .detach();
-}
-
-fn edit_line_comment(
-    workspace: &mut Workspace,
-    _: &EditLineComment,
-    window: &mut Window,
-    cx: &mut Context<Workspace>,
-) {
-    let Some(split) = workspace
-        .active_item_as::<SplittableEditor>(cx)
-        .or_else(|| {
-            workspace
-                .active_item_as::<crate::solo_diff_view::SoloDiffView>(cx)
-                .map(|view| view.read(cx).diff_editor().clone())
-        })
-    else {
-        cx.propagate();
-        return;
-    };
-    let result = diff_comment_target(workspace, &split, cx);
-    let Some((editor, anchor, target)) =
-        workspace::notifications::NotifyResultExt::notify_err(result, workspace, cx)
-    else {
-        return;
-    };
-    let task = editor.update(cx, |editor, cx| {
-        line_comments::edit_comment(editor, anchor, target, window, cx)
-    });
-    task.detach_and_notify_err(cx.weak_entity(), window, cx);
-}
-
-fn diff_comment_target(
-    workspace: &Workspace,
-    split: &Entity<SplittableEditor>,
-    cx: &mut App,
-) -> Result<(Entity<Editor>, editor::Anchor, line_comments::CommentTarget)> {
-    anyhow::ensure!(
-        workspace.project().read(cx).is_local(),
-        "Diff comments require a local project"
-    );
-    let split = split.read(cx);
-    let editor = split.focused_editor().clone();
-    let rhs = split.rhs_editor().clone();
-    let view = editor.read(cx);
-    let buffer = view.buffer().read(cx);
-    let snapshot = buffer.snapshot(cx);
-    let selection = view.selections.newest_anchor();
-    let anchor = selection.start;
-    use editor::ToPoint as _;
-    let (source, range) = snapshot
-        .range_to_buffer_range(
-            selection.start.to_point(&snapshot)..selection.end.to_point(&snapshot),
-        )
-        .context("Select lines from one side of one file")?;
-    let main_id = anchor.buffer_id().unwrap_or(source.remote_id());
-    let rhs_id = buffer
-        .diff_for(main_id)
-        .map_or(main_id, |diff| diff.read(cx).buffer_id);
-    let document = rhs
-        .read(cx)
-        .buffer()
-        .read(cx)
-        .buffer(rhs_id)
-        .context("Cannot find the diff file")?;
-    let file = document
-        .read(cx)
-        .file()
-        .context("The diff has no file path")?;
-    let (path, revision) = if let Some(commit) = workspace.active_item_as::<CommitView>(cx) {
-        let commit = commit.read(cx);
-        let path = commit
-            .repository
-            .read(cx)
-            .work_directory_abs_path
-            .join(file.path().as_std_path());
-        let revision = if source.remote_id() == rhs_id
-            && !matches!(file.disk_state(), DiskState::Historic { was_deleted: true })
-        {
-            commit.commit.sha.to_string()
-        } else {
-            format!("{}^", commit.commit.sha)
-        };
-        let revision = Some(revision);
-        (path, revision)
-    } else {
-        (
-            source
-                .file()
-                .and_then(|source_file| source_file.as_local())
-                .or_else(|| file.as_local())
-                .context("The diff has no local file path")?
-                .abs_path(cx),
-            None,
-        )
-    };
-    let (first_line, last_line) = line_comments::selected_lines(range);
-    let target = line_comments::CommentTarget {
-        abs_path: path,
-        first_line,
-        last_line,
-        revision,
-    };
-    Ok((editor, anchor, target))
 }
 
 pub struct CommitView {
@@ -316,11 +211,11 @@ impl CommitView {
         Self::open_with_options(commit_sha, repo, workspace, options, false, window, cx)
     }
 
-    pub(crate) fn commit_sha(&self) -> &SharedString {
+    pub fn commit_sha(&self) -> &SharedString {
         &self.commit.sha
     }
 
-    pub(crate) fn repository(&self) -> &Entity<Repository> {
+    pub fn repository(&self) -> &Entity<Repository> {
         &self.repository
     }
 

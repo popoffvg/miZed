@@ -170,6 +170,13 @@
     },
   },
   {
+    "context": "MultilineTextPrompt > Editor",
+    "bindings": {
+      "enter": "editor::Newline",
+      "ctrl-enter": "editor::NewlineBelow",
+    },
+  },
+  {
     "context": "Markdown",
     "bindings": {
       "copy": "markdown::Copy",
