@@ -14,7 +14,7 @@ use crate::comment_store_path::{CommentStoreName, line_comment_store_path};
 pub(crate) const STORE_VERSION: u32 = 1;
 const STORE_WATCH_LATENCY: Duration = Duration::from_millis(100);
 
-/// Comments in one named store, keyed by absolute file path.
+/// Comments in one named workspace store.
 pub struct CommentStore {
     files: BTreeMap<String, Vec<LineComment>>,
     loaded: bool,
@@ -42,7 +42,7 @@ struct CommentChange {
 pub struct LineComment {
     /// 1-based line that the comment starts on.
     pub line: u32,
-    /// 1-based last line, absent when the comment covers one line.
+    /// Optional 1-based last line of the comment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub end_line: Option<u32>,
     pub text: String,
@@ -147,7 +147,7 @@ impl CommentStore {
         store
     }
 
-    /// The comments of one file, by its absolute path.
+    /// The comments stored for a file path.
     pub fn comments(&self, path: &str) -> &[LineComment] {
         self.files.get(path).map(Vec::as_slice).unwrap_or_default()
     }
@@ -242,6 +242,11 @@ impl CommentStore {
         replacement: Option<LineComment>,
         cx: &mut Context<Self>,
     ) -> Task<anyhow::Result<()>> {
+        if !Path::new(path).is_absolute() {
+            return Task::ready(Err(anyhow::anyhow!(
+                "Save line comments with an absolute file path"
+            )));
+        }
         self.revision += 1;
         let (reply, result) = oneshot::channel();
         if self
@@ -321,21 +326,26 @@ async fn watch_store(
         }) else {
             return;
         };
+        let Some(revision) = revision else {
+            cx.background_executor().timer(STORE_WATCH_LATENCY).await;
+            continue;
+        };
         let files = load_store(fs.as_ref(), &path).await.log_err();
-        if store
-            .update(cx, |store, cx| {
-                if revision != Some(store.revision) {
-                    return;
-                }
-                store.loaded = files.is_some();
-                if let Some(files) = files {
-                    store.files = files;
-                }
-                cx.notify();
-            })
-            .is_err()
-        {
+        let Ok(applied) = store.update(cx, |store, cx| {
+            if revision != store.revision {
+                return false;
+            }
+            store.loaded = files.is_some();
+            if let Some(files) = files {
+                store.files = files;
+            }
+            cx.notify();
+            true
+        }) else {
             return;
+        };
+        if !applied {
+            continue;
         }
         loop {
             let Some(events) = events.next().await else {

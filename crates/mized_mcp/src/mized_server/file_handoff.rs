@@ -288,13 +288,13 @@ async fn wait_for_tab_close(
 ) -> Result<()> {
     let (sender, receiver) = oneshot::channel();
     let subscription = cx.update(|cx| {
-        if workspace.read(cx).pane_for_item_id(item_id).is_none() {
+        if !workspace.read(cx).items(cx).any(|item| item.item_id() == item_id) {
             return None;
         }
         let mut sender = Some(sender);
         Some(cx.subscribe(&workspace, move |workspace, event, cx| {
             if matches!(event, workspace::Event::ItemRemoved { item_id: removed } if *removed == item_id)
-                && workspace.read(cx).pane_for_item_id(item_id).is_none()
+                && !workspace.read(cx).items(cx).any(|item| item.item_id() == item_id)
                 && let Some(sender) = sender.take()
             {
                 sender.send(()).ok();

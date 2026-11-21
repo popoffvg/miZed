@@ -263,6 +263,12 @@ impl LineCommentsPanel {
             panel.sync_comment_store(None, window, cx);
         })
         .detach();
+        if let Some(workspace) = workspace.upgrade() {
+            cx.observe_in(&workspace, window, |panel, _, window, cx| {
+                panel.sync_comment_store(None, window, cx);
+            })
+            .detach();
+        }
         let panel = Self {
             workspace,
             project,

@@ -458,6 +458,7 @@ fn show_comments(editor: &mut Editor, cx: &mut Context<Editor>) {
                 if start_point > end_point
                     || start_point == end_point
                         && start_point == excerpt.end.to_point(&buffer)
+                        && buffer.line_len(start_point.row) != 0
                         && snapshot.as_singleton().is_none()
                 {
                     continue;

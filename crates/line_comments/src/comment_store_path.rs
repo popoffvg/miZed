@@ -1,6 +1,7 @@
 use std::{fmt, path::PathBuf, str::FromStr};
 
 const DEFAULT_COMMENT_STORE: &str = "default";
+const MAX_STORE_NAME_LENGTH: usize = 64;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct CommentStoreName(String);
@@ -23,11 +24,11 @@ impl FromStr for CommentStoreName {
     fn from_str(name: &str) -> anyhow::Result<Self> {
         let name = name.trim();
         anyhow::ensure!(
-            (1..=64).contains(&name.len())
+            (1..=MAX_STORE_NAME_LENGTH).contains(&name.len())
                 && name.bytes().all(|byte| {
                     byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'
                 }),
-            "Use 1 to 64 lowercase letters, digits, or hyphens for a comment store name"
+            "Use 1 to {MAX_STORE_NAME_LENGTH} lowercase letters, digits, or hyphens for a comment store name"
         );
         Ok(Self(name.into()))
     }
