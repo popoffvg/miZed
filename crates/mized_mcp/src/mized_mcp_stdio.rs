@@ -11,12 +11,15 @@ mod unix {
         io::{self, BufRead as _, BufReader, Read as _, Write as _},
         os::unix::{ffi::OsStrExt as _, net::UnixStream},
         path::Path,
+        sync::Arc,
         thread,
     };
 
     use anyhow::{Context as _, Result, bail, ensure};
     use context_server::{
-        client::{RequestId, RpcResponse, encode_notification, encode_request},
+        client::{
+            AnyRequest, INTERNAL_ERROR, RequestId, RpcResponse, encode_notification, encode_request,
+        },
         protocol::{check_protocol_version, initialize_parameters},
         types::{
             Implementation, InitializeResponse, Notification as _, Request as _,
@@ -75,10 +78,15 @@ mod unix {
             _ => bail!("{USAGE}"),
         };
 
-        let socket = connect_mcp_socket(Path::new(&address_file))?;
         match request {
-            Some((method, parameters)) => run_mcp_request(socket, method, parameters),
-            None => bridge_mcp_stdio(socket),
+            Some((method, parameters)) => {
+                let socket = connect_mcp_socket(Path::new(&address_file))?;
+                run_mcp_request(socket, method, parameters)
+            }
+            None => {
+                let address_file = Path::new(&address_file).to_path_buf();
+                bridge_mcp_stdio(move || connect_mcp_socket(&address_file))
+            }
         }
     }
 
@@ -98,24 +106,67 @@ mod unix {
         })
     }
 
-    fn bridge_mcp_stdio(mut output: UnixStream) -> Result<()> {
-        let mut input = output.try_clone()?;
-        thread::spawn(move || {
-            if let Err(error) = io::copy(&mut io::stdin().lock(), &mut input)
-                .and_then(|_| input.shutdown(std::net::Shutdown::Write))
-            {
-                eprintln!("Could not send miZed MCP input: {error}");
+    fn bridge_mcp_stdio(
+        connect: impl Fn() -> Result<UnixStream> + Send + Sync + 'static,
+    ) -> Result<()> {
+        let connect = Arc::new(connect);
+        for line in io::stdin().lock().lines() {
+            let line = line.context("Could not read miZed MCP input")?;
+            let Ok(request) = serde_json::from_str::<AnyRequest<'_>>(&line) else {
+                continue;
+            };
+            let initialize = request.method == Initialize::METHOD;
+            let request_id = request.id;
+            let worker_request_id = request_id.clone();
+            let connect = connect.clone();
+            if let Err(error) = thread::Builder::new().spawn(move || {
+                let response =
+                    forward_mcp_request(&*connect, &line, &worker_request_id, initialize);
+                if let Err(error) = write_bridge_response(&worker_request_id, response) {
+                    eprintln!("Could not send miZed MCP response: {error}");
+                }
+            }) {
+                write_bridge_response(
+                    &request_id,
+                    Err(error).context("Could not start the miZed MCP request"),
+                )?;
             }
-        });
-        io::copy(&mut output, &mut io::stdout().lock())
-            .context("Could not read miZed MCP output")?;
+        }
         Ok(())
     }
 
-    fn run_mcp_request(socket: UnixStream, method: &str, parameters: Value) -> Result<()> {
-        let mut socket = BufReader::new(socket);
+    fn forward_mcp_request(
+        connect: &impl Fn() -> Result<UnixStream>,
+        request: &str,
+        request_id: &RequestId,
+        initialize: bool,
+    ) -> Result<String> {
+        let mut socket = BufReader::new(connect()?);
+        if !initialize {
+            initialize_mcp_socket(&mut socket)?;
+        }
+        writeln!(socket.get_mut(), "{request}").context("Could not send the miZed MCP request")?;
+        read_mcp_response(&mut socket, request_id)
+            .context("Could not receive the miZed MCP response")
+    }
+
+    fn write_bridge_response(request_id: &RequestId, response: Result<String>) -> Result<()> {
+        let response = match response {
+            Ok(response) => response,
+            Err(error) => json!({
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "error": { "code": INTERNAL_ERROR, "message": format!("{error:#}") },
+            })
+            .to_string(),
+        };
+        writeln!(io::stdout().lock(), "{response}")?;
+        Ok(())
+    }
+
+    fn initialize_mcp_socket(socket: &mut BufReader<UnixStream>) -> Result<()> {
         let response: InitializeResponse = read_mcp_result(
-            &mut socket,
+            socket,
             1,
             Initialize::METHOD,
             initialize_parameters(Implementation {
@@ -131,6 +182,12 @@ mod unix {
             "{}",
             encode_notification(Initialized::METHOD, ())?
         )?;
+        Ok(())
+    }
+
+    fn run_mcp_request(socket: UnixStream, method: &str, parameters: Value) -> Result<()> {
+        let mut socket = BufReader::new(socket);
+        initialize_mcp_socket(&mut socket)?;
         let result: Value = read_mcp_result(&mut socket, 2, method, parameters)?;
         if result.get("isError").and_then(Value::as_bool) == Some(true) {
             bail!("miZed MCP tool failed: {}", result["content"]);
@@ -153,20 +210,108 @@ mod unix {
         let request_id = RequestId::Int(id);
         let request = encode_request(request_id.clone(), method, parameters)?;
         writeln!(socket.get_mut(), "{request}")?;
+        let response = read_mcp_response(socket, &request_id)
+            .with_context(|| format!("Could not receive the miZed MCP response for {method}"))?;
+        serde_json::from_str::<RpcResponse<'_>>(&response)?
+            .result()
+            .with_context(|| format!("miZed MCP request {method} failed"))
+    }
+
+    fn read_mcp_response(
+        socket: &mut BufReader<UnixStream>,
+        request_id: &RequestId,
+    ) -> Result<String> {
         let mut line = String::new();
         loop {
             line.clear();
             ensure!(
                 socket.read_line(&mut line)? != 0,
-                "miZed MCP disconnected during {method}"
+                "The miZed MCP socket closed"
             );
             if let Ok(response) = serde_json::from_str::<RpcResponse>(&line)
-                && response.request_id() == &request_id
+                && response.request_id() == request_id
             {
-                return response
-                    .result()
-                    .with_context(|| format!("miZed MCP request {method} failed"));
+                line.truncate(line.trim_end_matches(['\r', '\n']).len());
+                return Ok(line);
             }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use std::{cell::RefCell, net::Shutdown};
+
+        use context_server::types::LATEST_PROTOCOL_VERSION;
+
+        use super::*;
+
+        #[test]
+        fn next_request_connects_after_editor_disconnect() -> Result<()> {
+            let (first_socket, mut first_editor) = UnixStream::pair()?;
+            let (next_socket, mut next_editor) = UnixStream::pair()?;
+            for editor in [&mut first_editor, &mut next_editor] {
+                let reply = json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": {
+                        "protocolVersion": LATEST_PROTOCOL_VERSION,
+                        "capabilities": { "tools": {} },
+                        "serverInfo": { "name": "miZed", "version": "0" },
+                    },
+                });
+                writeln!(editor, "{reply}")?;
+            }
+            first_editor.shutdown(Shutdown::Write)?;
+            let next_reply = json!({"jsonrpc": "2.0", "id": "list", "result": {"tools": []}});
+            writeln!(next_editor, "{next_reply}")?;
+
+            let sockets = RefCell::new([first_socket, next_socket].into_iter());
+            let connect = || {
+                sockets
+                    .borrow_mut()
+                    .next()
+                    .context("No test socket is available")
+            };
+            let first_id = RequestId::Str("add".into());
+            let first_request = encode_request(
+                first_id.clone(),
+                CallTool::METHOD,
+                json!({"name": "add_comment", "arguments": {}}),
+            )?;
+            let interrupted = forward_mcp_request(&connect, &first_request, &first_id, false);
+            let Err(error) = interrupted else {
+                bail!("Expected the first miZed MCP request to fail");
+            };
+            assert_eq!(
+                error.root_cause().to_string(),
+                "The miZed MCP socket closed"
+            );
+
+            let next_id = RequestId::Str("list".into());
+            let next_request = encode_request(next_id.clone(), ListTools::METHOD, json!({}))?;
+            let reply = forward_mcp_request(&connect, &next_request, &next_id, false)?;
+            assert_eq!(serde_json::from_str::<Value>(&reply)?, next_reply);
+
+            for (mut editor, expected_request) in
+                [(first_editor, first_request), (next_editor, next_request)]
+            {
+                let mut requests = String::new();
+                editor.read_to_string(&mut requests)?;
+                let mut requests = requests.lines();
+                let initialize: Value = serde_json::from_str(
+                    requests.next().context("Expected an initialize request")?,
+                )?;
+                assert_eq!(initialize["method"], Initialize::METHOD);
+                let initialized: Value = serde_json::from_str(
+                    requests
+                        .next()
+                        .context("Expected an initialized notification")?,
+                )?;
+                assert_eq!(initialized["method"], Initialized::METHOD);
+                assert_eq!(requests.next(), Some(expected_request.as_str()));
+                assert_eq!(requests.next(), None);
+            }
+            Ok(())
         }
     }
 }

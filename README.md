@@ -128,6 +128,8 @@ args = ["/path/to/home/.mized-mcp-address"]
 tool_timeout_sec = 900
 ```
 
+After miZed restarts, the bridge connects again on the next request. If miZed interrupts a comment write, check the comment store before you retry.
+
 - `add_comment`, `read_comment`, and `list_comments` use named stores per workspace. Pass `store` to select a named store. The default is `default`.
 - `edit_comment` updates an existing comment in the selected store. Pass its absolute `path` and first `line`. Pass `text`, `done`, or both. Set `done` to `true` to mark it done or `false` to reopen it.
 - `clear_comments` deletes open and done comments from the selected store and returns the count. Pass an absolute `path` to clear one file. Omit `path` to clear the entire store.
